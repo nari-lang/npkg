@@ -1,0 +1,58 @@
+name: Release
+
+# on a vX.Y.Z tag push this bundles the npkg CLI into a tarball and publishes it as a release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version for the dry-run artifact name (e.g. v0.0.0-dev)'
+        required: false
+        default: 'v0.0.0-dev'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Bundle and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bundle
+        run: sh ./bundle.sh "${{ steps.version.outputs.version }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npkg-${{ steps.version.outputs.version }}
+          path: |
+            dist/npkg-${{ steps.version.outputs.version }}.tar.gz
+            dist/npkg-${{ steps.version.outputs.version }}.tar.gz.sha256
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/npkg-${{ steps.version.outputs.version }}.tar.gz
+            dist/npkg-${{ steps.version.outputs.version }}.tar.gz.sha256

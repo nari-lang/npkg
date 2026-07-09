@@ -14,7 +14,7 @@ func format_integrity(pkg) {
 func render_v1(root_manifest, resolved_packages) {
     let lines = [];
     lines.push("lockfileVersion = 1");
-    lines.push("root = " @ quote_string(root_manifest["name"] @ "@" @ root_manifest["version"]));
+    lines.push("root = " + quote_string(root_manifest["name"] + "@" + root_manifest["version"]));
     lines.push("");
     append_packages(lines, resolved_packages);
     return lines.join("\n");
@@ -27,10 +27,10 @@ func render_v2(workspace, resolved_packages, members) {
     lines.push("lockfileVersion = 2");
     let root_manifest = workspace["rootManifest"];
     if (root_manifest.has_key("name") && root_manifest["name"] != null && root_manifest["name"] != "") {
-        lines.push("workspaceRoot = " @ quote_string(root_manifest["name"] @ "@" @ root_manifest["version"]));
+        lines.push("workspaceRoot = " + quote_string(root_manifest["name"] + "@" + root_manifest["version"]));
     } else {
-        // Virtual root records the directory so we can still detect moves
-        lines.push("workspaceRoot = " @ quote_string("virtual:" @ workspace["rootDir"]));
+        // virtual root records the directory so we can still detect moves
+        lines.push("workspaceRoot = " + quote_string("virtual:" + workspace["rootDir"]));
     }
     lines.push("");
 
@@ -44,7 +44,7 @@ func render_v2(workspace, resolved_packages, members) {
         for (name in names) {
             for (m in members) {
                 if (m["name"] == name) {
-                    member_pairs.push(name @ "@" @ m["version"]);
+                    member_pairs.push(name + "@" + m["version"]);
                     break;
                 }
             }
@@ -52,7 +52,7 @@ func render_v2(workspace, resolved_packages, members) {
         let joined = "";
         let i = 0;
         while (i < member_pairs.length()) {
-            if (i > 0) { joined = joined @ ", "; }
+            if (i > 0) { joined = joined + ", "; }
             joined = joined @ quote_string(member_pairs[i]);
             i++;
         }
@@ -70,13 +70,13 @@ func append_packages(lines, resolved_packages) {
 
     for (package_name in package_names) {
         let pkg = resolved_packages[package_name];
-        lines.push("[packages." @ quote_string(package_name) @ "]");
-        lines.push("version = " @ quote_string(pkg["version"]));
-        lines.push("integrity = " @ quote_string(format_integrity(pkg)));
-        lines.push("source = " @ quote_string(pkg["source"]));
-        lines.push("storePath = " @ quote_string(pkg["storePath"]));
+        lines.push("[packages." + quote_string(package_name) + "]");
+        lines.push("version = " + quote_string(pkg["version"]));
+        lines.push("integrity = " + quote_string(format_integrity(pkg)));
+        lines.push("source = " + quote_string(pkg["source"]));
+        lines.push("storePath = " + quote_string(pkg["storePath"]));
         if (pkg["source"] == "registry" && pkg.has_key("registry")) {
-            lines.push("registry = " @ quote_string(pkg["registry"]));
+            lines.push("registry = " + quote_string(pkg["registry"]));
         }
 
         let dep_names = pkg["dependencies"].keys();
@@ -85,7 +85,7 @@ func append_packages(lines, resolved_packages) {
             lines.push("");
             lines.push("[packages." @ quote_string(package_name) @ ".dependencies]");
             for (dep_name in dep_names) {
-                lines.push(quote_string(dep_name) @ " = " @ quote_string(pkg["dependencies"][dep_name]));
+                lines.push(quote_string(dep_name) + " = " + quote_string(pkg["dependencies"][dep_name]));
             }
         }
 
@@ -93,7 +93,7 @@ func append_packages(lines, resolved_packages) {
     }
 }
 
-// dispatches between v1 (single package) and v2 (workspace) based on `resolution["workspace"]`
+// switches between v1 (single package) and v2 (workspace) based on `resolution["workspace"]`
 export func render_lockfile(root_manifest, resolved_packages, workspace, members) {
     if (workspace != null) {
         return render_v2(workspace, resolved_packages, members);

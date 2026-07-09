@@ -1,4 +1,4 @@
-#!/usr/bin/env /home/wearr/Documents/Coding/Nari/build/release/interpreter
+#!/usr/bin/env nari
 import Path from "./lib/path_utils.nari";
 import { Archive } from "std/archive";
 import Store from "./lib/store.nari";
