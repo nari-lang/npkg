@@ -1,0 +1,220 @@
+export func is_absolute(path) {
+    return path.length() > 0 && path[0] == "/";
+}
+
+export func normalize_path(path) {
+    if (path == null || path == "") {
+        return ".";
+    }
+
+    let absolute = is_absolute(path);
+    let parts = path.split("/");
+    let stack = [];
+
+    for (part in parts) {
+        if (part == "" || part == ".") {
+            continue;
+        }
+
+        if (part == "..") {
+            if (stack.length() > 0 && stack[stack.length() - 1] != "..") {
+                stack.pop();
+            } else if (!absolute) {
+                stack.push("..");
+            }
+            continue;
+        }
+
+        stack.push(part);
+    }
+
+    let joined = stack.join("/");
+    if (absolute) {
+        if (joined == "") {
+            return "/";
+        }
+        return "/" @ joined;
+    }
+
+    if (joined == "") {
+        return ".";
+    }
+
+    return joined;
+}
+
+export func join_path(left, right) {
+    if (left == null || left == "") {
+        return normalize_path(right);
+    }
+    if (right == null || right == "") {
+        return normalize_path(left);
+    }
+    if (is_absolute(right)) {
+        return normalize_path(right);
+    }
+    if (left == "/") {
+        return normalize_path("/" @ right);
+    }
+    if (left.ends_with("/")) {
+        return normalize_path(left @ right);
+    }
+    return normalize_path(left @ "/" @ right);
+}
+
+export func dirname(path) {
+    let normalized = normalize_path(path);
+    if (normalized == "/") {
+        return "/";
+    }
+
+    let slash = normalized.last_index_of("/");
+    if (slash == -1) {
+        return ".";
+    }
+    if (slash == 0) {
+        return "/";
+    }
+    return normalized.substr(0, slash);
+}
+
+export func basename(path) {
+    let normalized = normalize_path(path);
+    if (normalized == "/") {
+        return "/";
+    }
+
+    let slash = normalized.last_index_of("/");
+    if (slash == -1) {
+        return normalized;
+    }
+    return normalized.substr(slash + 1, normalized.length());
+}
+
+export func relative_from(root, full_path) {
+    let nroot = normalize_path(root);
+    let nfull = normalize_path(full_path);
+    if (nfull == nroot) {
+        return ".";
+    }
+    let prefix = nroot.ends_with("/") ? nroot : nroot @ "/";
+    if (nfull.starts_with(prefix)) {
+        return nfull.substr(prefix.length(), nfull.length());
+    }
+    return nfull;
+}
+
+export func sanitize_package_name(name) {
+    return name.replace_all("/", "-");
+}
+
+export func manifest_path(root_dir) {
+    return join_path(root_dir, "nari.toml");
+}
+
+// walk up from `start_dir` looking for the nearest nari.toml, returning the dir that has it
+export func find_nearest_manifest(start_dir) {
+    let current = normalize_path(start_dir);
+    if (!is_absolute(current)) {
+        let cwd = platform.getenv("PWD");
+        if (cwd == null || cwd == "") { cwd = "."; }
+        current = normalize_path(join_path(cwd, current));
+    }
+
+    while (true) {
+        let candidate = manifest_path(current);
+        if (await fs.fileExists(candidate)) {
+            return current;
+        }
+        let parent = dirname(current);
+        if (parent == current) { return null; }
+        current = parent;
+    }
+    return null;
+}
+
+// match a single path segment against a glob fragment that may contain `*`
+func segment_matches(segment, pattern) {
+    if (pattern == "*") { return true; }
+    if (pattern.index_of("*") == -1) { return segment == pattern; }
+    // split pattern on `*` and require each piece to appear in order, anchored at the segment edges
+    let pieces = pattern.split("*");
+    let pos = 0;
+    let i = 0;
+    while (i < pieces.length()) {
+        let piece = pieces[i];
+        if (piece == "") {
+            // empty piece occurs at the start, end, or between adjacent stars
+            if (i == 0) { i++; continue; }
+            if (i == pieces.length() - 1) { return true; }
+            i++;
+            continue;
+        }
+        if (i == 0) {
+            if (!segment.starts_with(piece)) { return false; }
+            pos = piece.length();
+        } else if (i == pieces.length() - 1) {
+            if (!segment.ends_with(piece)) { return false; }
+            let tail_start = segment.length() - piece.length();
+            if (tail_start < pos) { return false; }
+        } else {
+            let found = segment.index_of(piece);
+            // find an occurrence at or after `pos`.
+            let scan = pos;
+            let hit = -1;
+            while (scan <= segment.length() - piece.length()) {
+                let candidate = segment.substr(scan, scan + piece.length());
+                if (candidate == piece) { hit = scan; break; }
+                scan++;
+            }
+            if (hit == -1) { return false; }
+            pos = hit + piece.length();
+        }
+        i++;
+    }
+    return true;
+}
+
+// Expand one workspace member glob (e.g. "packages/*") relative to `root_dir`
+// into a list of absolute member directories that contain a nari.toml.
+export func expand_member_pattern(root_dir, pattern) {
+    let normalized = normalize_path(pattern);
+    if (normalized.index_of("*") == -1) {
+        let dir = normalize_path(join_path(root_dir, normalized));
+        if (fs.is_directory(dir) && await fs.file_exists(manifest_path(dir))) {
+            return [dir];
+        }
+        return [];
+    }
+
+    let segments = normalized.split("/");
+    let frontier = [root_dir];
+    for (segment in segments) {
+        let next = [];
+        for (current in frontier) {
+            if (!fs.is_directory(current)) { continue; }
+            if (segment.index_of("*") == -1) {
+                next.push(join_path(current, segment));
+                continue;
+            }
+            let entries = await fs.list_dir(current);
+            if (entries == null) { continue; }
+            entries.sort();
+            for (name in entries) {
+                if (name.starts_with(".")) { continue; }
+                if (segment_matches(name, segment)) {
+                    next.push(join_path(current, name));
+                }
+            }
+        }
+        frontier = next;
+    }
+
+    let results = [];
+    for (dir in frontier) {
+        if (fs.is_directory(dir) && await fs.file_exists(manifest_path(dir))) {
+            results.push(normalize_path(dir));
+        }
+    }
+    return results;
+}

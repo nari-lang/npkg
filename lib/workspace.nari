@@ -1,0 +1,106 @@
+import Path from "./path_utils.nari";
+import Manifest from "./manifest.nari";
+
+// Try to load the manifest at `dir`; return null if it doesn't validate
+func try_load_manifest(dir) {
+    let manifest_path = Path.manifest_path(dir);
+    if (!await fs.file_exists(manifest_path)) { return null; }
+    try {
+        return Manifest.load_manifest(dir);
+    } catch (err) {
+        return null;
+    }
+}
+
+// Walk upward from `start_dir` looking for the closest nari.toml that declares a `[workspace]` table.
+export func find_root(start_dir) {
+    let current = Path.normalize_path(start_dir);
+    if (!Path.is_absolute(current)) {
+        let cwd = platform.getenv("PWD");
+        if (cwd == null || cwd == "") { cwd = "."; }
+        current = Path.normalize_path(Path.join_path(cwd, current));
+    }
+
+    while (true) {
+        let manifest = try_load_manifest(current);
+        if (manifest != null && Manifest.is_workspace_root(manifest)) {
+            return current;
+        }
+        let parent = Path.dirname(current);
+        if (parent == current) { return null; }
+        current = parent;
+    }
+    return null;
+}
+
+// Expand the root manifest's member globs into a deduplicated, sorted list of member directories.
+func expand_members(root_dir, root_manifest) {
+    let patterns = root_manifest["workspace"]["members"];
+    let seen = {};
+    let members = [];
+    for (pattern in patterns) {
+        let expanded = Path.expand_member_pattern(root_dir, pattern);
+        for (dir in expanded) {
+            // Skip the workspace root itself if it appears in the pattern.
+            if (dir == root_dir) { continue; }
+            if (seen.has_key(dir)) { continue; }
+            seen[dir] = true;
+            members.push(dir);
+        }
+    }
+    members.sort();
+    return members;
+}
+
+// Load every workspace member's manifest. Throws on a member whose manifest fails to load.
+func load_members(member_dirs) {
+    let loaded = [];
+    let by_name = {};
+    for (dir in member_dirs) {
+        let manifest = Manifest.load_manifest(dir);
+        Manifest.validate_manifest(manifest, false);
+        if (!Manifest.has_package(manifest)) {
+            // A workspace member must be a publishable package
+            throw "Workspace member at " @ dir @ " has no name/version; nested workspaces are not supported";
+        }
+        let name = manifest["name"];
+        if (by_name.has_key(name)) {
+            throw "Duplicate workspace member name '" @ name @ "' at " @ dir @ " and " @ by_name[name]["rootDir"];
+        }
+        by_name[name] = manifest;
+        loaded.push(manifest);
+    }
+    return { manifests: loaded, byName: by_name };
+}
+
+// discover the workspace that contains `start_dir`, returning the root manifest, the absolute root directory, and every member manifest.
+export func discover_from(start_dir) {
+    let root_dir = find_root(start_dir);
+    if (root_dir == null) { return null; }
+
+    let root_manifest = Manifest.load_manifest(root_dir);
+    Manifest.validate_manifest(root_manifest, false);
+
+    let member_dirs = expand_members(root_dir, root_manifest);
+    let loaded = load_members(member_dirs);
+
+    // if the workspace root is itself a package, register it as a member so it participates in cross-workspace dep resolution
+    let manifests = loaded["manifests"];
+    let by_name = loaded["byName"];
+    if (Manifest.has_package(root_manifest)) {
+        let root_name = root_manifest["name"];
+        if (by_name.has_key(root_name)) {
+            throw "Workspace root package '" @ root_name @ "' collides with member at " @ by_name[root_name]["rootDir"];
+        }
+        manifests = [root_manifest].concat(manifests);
+        by_name[root_name] = root_manifest;
+    }
+
+    return {
+        rootDir: root_dir,
+        rootManifest: root_manifest,
+        members: manifests,
+        byName: by_name,
+        isVirtual: !Manifest.has_package(root_manifest),
+    };
+}

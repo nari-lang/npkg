@@ -1,0 +1,42 @@
+let HEX_DIGITS = "0123456789abcdef";
+let FNV_OFFSET = 2166136261;
+let FNV_PRIME = 16777619;
+let UINT32_MOD = 4294967296;
+
+export func fnv1a_32(text) {
+    let hash = FNV_OFFSET;
+    let i = 0;
+    while (i < text.length()) {
+        let code = text.char_code_at(i);
+        if (code < 0) {
+            code = 0;
+        }
+        hash = hash ^ code;
+        hash = (hash * FNV_PRIME) % UINT32_MOD;
+        i++;
+    }
+    return hash;
+}
+
+export func to_hex8(value) {
+    let parts = [];
+    let current = value;
+    let count = 0;
+
+    while (count < 8) {
+        let digit = current % 16;
+        if (digit < 0) {
+            digit = digit + 16;
+        }
+        parts.push(HEX_DIGITS.char_code_at(digit));
+        current = math.floor(current / 16);
+        count++;
+    }
+
+    parts.reverse();
+    return parts.join("");
+}
+
+export func short_hash(text) {
+    return to_hex8(fnv1a_32(text));
+}

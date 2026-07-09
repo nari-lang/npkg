@@ -1,0 +1,602 @@
+import Path from "./path_utils.nari";
+import { Hash } from "std/hash";
+import { Archive } from "std/archive";
+
+// Returns true if `c` is in [a-z0-9._-]
+func _is_segment_byte(c) {
+    if (c >= 97 && c <= 122) { return true; }  // a-z
+    if (c >= 48 && c <= 57)  { return true; }  // 0-9
+    if (c == 46 || c == 95 || c == 45) { return true; }  // . _ -
+    return false;
+}
+
+func _is_alnum(c) {
+    if (c >= 97 && c <= 122) { return true; }
+    if (c >= 48 && c <= 57)  { return true; }
+    return false;
+}
+
+// `^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$`
+func _valid_segment(s) {
+    let n = s.length();
+    if (n == 0) { return false; }
+    if (!_is_alnum(s.char_code_at(0))) { return false; }
+    if (n > 1 && !_is_alnum(s.char_code_at(n - 1))) { return false; }
+    let i = 1;
+    while (i < n - 1) {
+        if (!_is_segment_byte(s.char_code_at(i))) { return false; }
+        i++;
+    }
+    return true;
+}
+
+// length cap of 128
+export func validate_package_name(name) {
+    if (name == null || name == "" || name.length() > 128) {
+        throw "Invalid package name (must be 1-128 chars): '" @ name @ "'";
+    }
+    if (name.starts_with("@")) {
+        let slash = name.index_of("/");
+        if (slash <= 1 || slash == name.length() - 1) {
+            throw "Invalid scoped package name (expected '@scope/name'): '" @ name @ "'";
+        }
+        let scope = name.substr(1, slash - 1);
+        let segment = name.substr(slash + 1, name.length() - slash - 1);
+        if (!_valid_segment(scope) || !_valid_segment(segment)) {
+            throw "Scoped package name must match @<scope>/<name> with lowercase " @
+                "alphanumerics, '.', '_', '-' (boundaries alphanumeric): '" @ name @ "'";
+        }
+        return;
+    }
+    if (!_valid_segment(name)) {
+        throw "Package name must be lowercase alphanumerics, '.', '_', '-' " @ "(boundaries alphanumeric): '" @ name @ "'";
+    }
+}
+
+// Allowed bytes: 0-9 A-Z a-z . + _ -
+// No leading dot, no '/' or '\\', no '.' / '..', max 64 chars.
+func _is_version_byte(char) {
+    if (char >= 48 && char <= 57)  { return true; }  // 0-9
+    if (char >= 65 && char <= 90)  { return true; }  // A-Z
+    if (char >= 97 && char <= 122) { return true; }  // a-z
+    if (char == 46 || char == 43 || char == 95 || char == 45) { return true; }  // . + _ -
+    return false;
+}
+
+export func validate_version_string(v) {
+    if (v == null || v == "" || v.length() > 64) {
+        throw "Invalid version (must be 1-64 chars): '" @ v @ "'";
+    }
+    if (v == "." || v == "..") {
+        throw "Invalid version (reserved): '" @ v @ "'";
+    }
+    if (v.starts_with(".")) {
+        throw "Invalid version (leading dot not allowed): '" @ v @ "'";
+    }
+    if (v.index_of("/") != -1 || v.index_of("\\") != -1) {
+        throw "Invalid version (path separators not allowed): '" @ v @ "'";
+    }
+    let i = 0;
+    while (i < v.length()) {
+        if (!_is_version_byte(v.char_code_at(i))) {
+            throw "Invalid version (allowed chars: 0-9 A-Z a-z . + _ -): '" @ v @ "'";
+        }
+        i++;
+    }
+}
+
+// emit warnings for missing recommended fields
+export func warn_recommended_fields(manifest, project_dir, warn) {
+    if (!manifest.has_key("description") || manifest["description"] == null || manifest["description"] == "") {
+        warn("manifest has no 'description' field (recommended for registry listings)");
+    }
+    if (!manifest.has_key("license") || manifest["license"] == null || manifest["license"] == "") {
+        warn("manifest has no 'license' field (recommended; e.g. license = \"MIT\")");
+    }
+
+    let readme_candidates = ["README.md", "README", "readme.md", "readme"];
+    let has_readme = false;
+    for (cand in readme_candidates) {
+        if (await fs.fileExists(Path.join_path(project_dir, cand))) {
+            has_readme = true;
+        }
+    }
+    if (!has_readme) {
+        warn("no README found in project root (recommended for registry listings)");
+    }
+}
+
+// Dirty-git detection
+// Run `git status --porcelain` for project_dir and return its raw stdout (or null if the command failed / not a git repo)
+func _git_porcelain(project_dir) {
+    let home = platform.getenv("HOME");
+    if (home == null || home == "") { home = "/tmp"; }
+    let cache_dir = Path.join_path(home, ".nari/cache/npkg-publish");
+    fs.mkdir_all(cache_dir);
+
+    let project_tag = Hash.sha256(project_dir).substr(0, 12);
+    let probe_path = Path.join_path(cache_dir, "git_status." @ project_tag @ ".out");
+
+    // Single-quote-escape project_dir; project_dir comes from CLI.
+    let escaped = "'" @ project_dir.replace_all("'", "'\\''") @ "'";
+    let probe_escaped = "'" @ probe_path.replace_all("'", "'\\''") @ "'";
+    // 2>/dev/null suppresses both git's stderr and the > redirect's failure
+    // noise if cache_dir somehow isn't writable.
+    let cmd = "git -C " @ escaped @ " status --porcelain > " @ probe_escaped @ " 2>/dev/null";
+    let code = system.exec(cmd);
+    if (code != 0) {
+        if (await fs.file_exists(probe_path)) { await fs.delete_file(probe_path); }
+        return null;
+    }
+    let body = "";
+    if (await fs.file_exists(probe_path)) {
+        body = await fs.read_file(probe_path);
+        if (body == null) { body = ""; }
+        await fs.delete_file(probe_path);
+    }
+    return body;
+}
+
+// Returns one of:
+//   "clean"       - git repo with empty `git status --porcelain`
+//   "dirty"       - git repo with uncommitted changes
+//   "not-a-repo"  - `git status` failed (no .git, or no git binary)
+export func detect_git_state(project_dir) {
+    let body = _git_porcelain(project_dir);
+    if (body == null) { return "not-a-repo"; }
+    if (body.trim() == "") { return "clean"; }
+    return "dirty";
+}
+
+// Build a short bullet list of uncommitted files for the dirty-refusal error.
+// Caps at `max` entries; appends "  ... and N more" if there are more.
+export func summarize_dirty_files(project_dir, max) {
+    let body = _git_porcelain(project_dir);
+    if (body == null || body.trim() == "") { return ""; }
+    let lines = body.split("\n");
+    let files = [];
+    for (raw in lines) {
+        let line = raw;
+        if (line.ends_with("\r")) { line = line.substr(0, line.length() - 1); }
+        if (line.trim() == "") { continue; }
+        // Porcelain format: "XY path". Strip the 3-char status prefix.
+        if (line.length() > 3) {
+            files.push(line.substr(3, line.length() - 3));
+        } else {
+            files.push(line);
+        }
+    }
+    if (files.length() == 0) { return ""; }
+    let shown = max;
+    if (files.length() < shown) { shown = files.length(); }
+    let out = "";
+    let i = 0;
+    while (i < shown) {
+        out = out @ "    " @ files[i];
+        if (i < shown - 1) { out = out @ "\n"; }
+        i++;
+    }
+    if (files.length() > shown) {
+        out = out @ "\n    ... and " @ (files.length() - shown) @ " more";
+    }
+    return out;
+}
+
+// Ignore patterns
+// Defaults always applied even with no .gitignore/.npkgignore
+let _DEFAULT_IGNORES = [
+    ".git/",
+    ".hg/",
+    ".svn/",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.swp",
+    "*.swo",
+    "*.tmp",
+    "node_modules/",
+    "package.tar.gz",
+    "*.log"
+];
+
+// Parse a single ignore file. Returns an array of { pattern, negate, dir_only, anchored } records.
+func _parse_ignore_file(text) {
+    let out = [];
+    let lines = text.split("\n");
+    for (raw in lines) {
+        let line = raw;
+        // Strip CR for CRLF files.
+        if (line.ends_with("\r")) {
+            line = line.substr(0, line.length() - 1);
+        }
+        let trimmed = line.trim();
+        if (trimmed == "" || trimmed.starts_with("#")) { continue; }
+
+        let negate = false;
+        if (trimmed.starts_with("!")) {
+            negate = true;
+            trimmed = trimmed.substr(1, trimmed.length() - 1);
+        }
+        let anchored = false;
+        if (trimmed.starts_with("/")) {
+            anchored = true;
+            trimmed = trimmed.substr(1, trimmed.length() - 1);
+        }
+        let dir_only = false;
+        if (trimmed.ends_with("/")) {
+            dir_only = true;
+            trimmed = trimmed.substr(0, trimmed.length() - 1);
+        }
+        if (trimmed == "") { continue; }
+
+        out.push({
+            pattern: trimmed,
+            negate: negate,
+            dir_only: dir_only,
+            anchored: anchored
+        });
+    }
+    return out;
+}
+
+// Read .gitignore + .npkgignore from project_dir and concatenate them with the defaults
+export func load_ignore_patterns(project_dir) {
+    let all = [];
+    for (p in _parse_ignore_file(_DEFAULT_IGNORES.join("\n"))) { all.push(p); }
+
+    let gi = Path.join_path(project_dir, ".gitignore");
+    if (await fs.fileExists(gi)) {
+        let text = await fs.readFile(gi);
+        if (text != null) {
+            for (p in _parse_ignore_file(text)) { all.push(p); }
+        }
+    }
+    let ni = Path.join_path(project_dir, ".npkgignore");
+    if (await fs.fileExists(ni)) {
+        let text = await fs.readFile(ni);
+        if (text != null) {
+            for (p in _parse_ignore_file(text)) { all.push(p); }
+        }
+    }
+    return all;
+}
+
+// glob-match a single segment: supports '*' (any non-slash char) and '?' (single non-slash char).
+func _segment_glob(pattern, text) {
+    let p_len = pattern.length();
+    let t_len = text.length();
+    let p = 0;
+    let t = 0;
+    let star_p = -1;
+    let star_t = -1;
+    while (t < t_len) {
+        if (p < p_len) {
+            let pc = pattern.char_code_at(p);
+            if (pc == 42) {  // '*'
+                star_p = p;
+                star_t = t;
+                p++;
+                continue;
+            }
+            if (pc == 63 || pc == text.char_code_at(t)) {  // '?' or literal
+                p++;
+                t++;
+                continue;
+            }
+        }
+        if (star_p != -1) {
+            p = star_p + 1;
+            star_t++;
+            t = star_t;
+            continue;
+        }
+        return false;
+    }
+    while (p < p_len && pattern.char_code_at(p) == 42) { p++; }
+    return p == p_len;
+}
+
+// match rel_path against one parsed pattern.
+func _pattern_matches(rec, rel_path, is_dir) {
+    let pat = rec["pattern"];
+    let has_slash = pat.index_of("/") != -1;
+    let segments = rel_path.split("/");
+
+    if (rec["dir_only"]) {
+        let matched_dir = false;
+        if (rec["anchored"] || has_slash) {
+            if (rec["anchored"] && _segment_glob(pat, rel_path)) { matched_dir = is_dir; }
+            // For multi-segment dir_only patterns we also check ancestor prefix.
+            if (rel_path == pat || rel_path.starts_with(pat @ "/")) {
+                matched_dir = true;
+            }
+        } else {
+            // bare segment, e.g. ".git/"
+            for (seg in segments) {
+                if (_segment_glob(pat, seg)) {
+                    matched_dir = true;
+                }
+            }
+        }
+        return matched_dir;
+    }
+
+    if (rec["anchored"] || has_slash) {
+        // Anchored to root.
+        // For multi-segment patterns we additionally treat matching a directory prefix as a match for everything in it.
+        if (_segment_glob(pat, rel_path)) { return true; }
+        if (rel_path.starts_with(pat @ "/")) { return true; }
+        return false;
+    }
+
+    // bare pattern: match any segment of the path.
+    for (seg in segments) {
+        if (_segment_glob(pat, seg)) { return true; }
+    }
+    return false;
+}
+
+// walk every rule top-to-bottom, later rules win.
+// rel_path uses forward slashes and has no leading slash.
+export func is_ignored(rel_path, is_dir, patterns) {
+    let ignored = false;
+    for (rec in patterns) {
+        if (_pattern_matches(rec, rel_path, is_dir)) {
+            ignored = !rec["negate"];
+        }
+    }
+    return ignored;
+}
+
+// walk `root` and return [{src, dest}, ...] suitable for Archive.create
+export func walk_files_for_archive(root, patterns) {
+    let entries = [];
+    let stack = [{abs: root, rel: ""}];
+    while (stack.length() > 0) {
+        let cur = stack.pop();
+        let names = await fs.list_dir(cur["abs"]);
+        if (names == null) { continue; }
+        names.sort();
+        for (name in names) {
+            if (name == "." || name == "..") { continue; }
+            let abs_child = Path.join_path(cur["abs"], name);
+            let rel_child = cur["rel"] == "" ? name : (cur["rel"] @ "/" @ name);
+            let is_dir = fs.is_directory(abs_child);
+
+            if (is_ignored(rel_child, is_dir, patterns)) { continue; }
+
+            if (is_dir) {
+                stack.push({abs: abs_child, rel: rel_child});
+            } else {
+                entries.push({src: abs_child, dest: rel_child});
+            }
+        }
+    }
+    return entries;
+}
+
+// Archive integrity reporting
+// Returns an object with size + checksum + a human-readable size string.
+export func archive_report(archive_path) {
+    let size = 0;
+    let listing = Archive.list(archive_path);
+    let count = listing.length();
+    // libarchive doesn't tell us compressed size; stat the file via fs.
+    // We rely on `archive_path` existing - caller just created it.
+    let body = await fs.read_file(archive_path);
+    if (body != null) { size = body.length(); }
+
+    let checksum = Hash.sha256_file(archive_path);
+
+    return {
+        bytes: size,
+        files: count,
+        sha256: checksum,
+        size_human: _format_bytes(size)
+    };
+}
+
+func _format_bytes(n) {
+    if (n < 1024) { return n @ " B"; }
+    if (n < 1048576) {
+        let k = n / 1024.0;
+        return _round1(k) @ " KiB";
+    }
+    let m = n / 1048576.0;
+    return _round1(m) @ " MiB";
+}
+
+func _round1(f) {
+    let scaled = math.floor(f * 10.0 + 0.5);
+    let whole = math.floor(scaled / 10.0);
+    let frac = scaled - whole * 10.0;
+    return whole @ "." @ frac;
+}
+
+// Returns true if a 200 OK is observed for `/api/packages/{name}/versions/{ver}`.
+export func remote_version_exists(registry_url, pkg_name, version) {
+    let encoded = pkg_name.replace_all("/", "%2F").replace_all("@", "%40");
+    let url = registry_url @ "/api/packages/" @ encoded @ "/versions/" @ version;
+    let resp = null;
+    try {
+        resp = await http.get(url);
+    } catch (e) {
+        return false;
+    }
+    if (resp == null) { return false; }
+    return resp.status_code == 200;
+}
+
+// Parse registry response into { ok, error_message, integrity }.
+// Success: {"version","integrity":"sha256-...","archiveUrl"}.
+// Error: {"error": "..."}.
+export func parse_upload_response(body_text) {
+    if (body_text == null || body_text == "") {
+        return {ok: false, error_message: "empty response from registry", integrity: null};
+    }
+    let parsed = null;
+    try {
+        parsed = JSON.parse(body_text);
+    } catch (e) {
+        return {
+            ok: false,
+            error_message: "non-JSON response from registry: " @ _truncate(body_text, 200),
+            integrity: null
+        };
+    }
+    if (parsed == null || typeof(parsed) != "object") {
+        return {
+            ok: false,
+            error_message: "unexpected response from registry: " @ _truncate(body_text, 200),
+            integrity: null
+        };
+    }
+    if (parsed.has_key("error")) {
+        let msg = parsed["error"];
+        if (typeof(msg) != "string") { msg = body_text; }
+        return {ok: false, error_message: msg, integrity: null};
+    }
+    if (parsed.has_key("version") && parsed.has_key("integrity")) {
+        return {ok: true, error_message: null, integrity: parsed["integrity"]};
+    }
+    return {
+        ok: false,
+        error_message: "registry response missing version/integrity fields",
+        integrity: null
+    };
+}
+
+func _truncate(s, n) {
+    if (s.length() <= n) { return s; }
+    return s.substr(0, n) @ "...";
+}
+
+// Server cap is 64 MiB, keep a 1 MB boundary just in case
+let _MAX_ARCHIVE_BYTES = 63 * 1048576;
+
+export func enforce_archive_size(bytes, pkg_name) {
+    if (bytes > _MAX_ARCHIVE_BYTES) {
+        throw "Archive for " @ pkg_name @ " is " @ _format_bytes(bytes) @
+            " which exceeds the registry limit (" @ _format_bytes(_MAX_ARCHIVE_BYTES) @
+            "). Add large files to .npkgignore or split the package.";
+    }
+}
+
+// builds a multipart/form-data body for uploading an archive
+export func make_multipart(boundary, text_fields, file_field, file_name, file_bytes) {
+    let crlf = "\r\n";
+    let body = "";
+    let i = 0;
+    while (i < text_fields.length()) {
+        let kv = text_fields[i];
+        body = body @ "--" @ boundary @ crlf;
+        body = body @ "Content-Disposition: form-data; name=\"" @ kv[0] @ "\"" @ crlf;
+        body = body @ crlf;
+        body = body @ kv[1] @ crlf;
+        i++;
+    }
+    body = body @ "--" @ boundary @ crlf;
+    body = body @ "Content-Disposition: form-data; name=\"" @ file_field @
+                  "\"; filename=\"" @ file_name @ "\"" @ crlf;
+    body = body @ "Content-Type: application/octet-stream" @ crlf;
+    body = body @ crlf;
+    body = body @ file_bytes @ crlf;
+    body = body @ "--" @ boundary @ "--" @ crlf;
+    return body;
+}
+
+// POST the package archive to the registry.
+// Returns the registry response body text on success.
+// Throws on transport failure or non-2xx response with the server's error message
+export func upload_archive(registry_url, encoded_pkg_name, version, token, archive_path) {
+    let bytes = await fs.read_file(archive_path);
+    if (bytes == null) {
+        throw "Failed to read archive at " @ archive_path;
+    }
+
+    let boundary = "----nari-npkg-" @ ("" @ time()).replace_all(".", "-") @ "-" @ bytes.length();
+
+    // declare the archive checksum so the server can verify the upload arrived intact.
+    let declared_integrity = "sha256-" @ Hash.sha256File(archive_path);
+    let body = make_multipart(
+        boundary,
+        [["version", version], ["integrity", declared_integrity]],
+        "archive",
+        "package.tar.gz",
+        bytes
+    );
+
+    let url = registry_url @ "/api/packages/" @ encoded_pkg_name @ "/versions";
+    let resp = null;
+    try {
+        resp = await http.get({
+            url: url,
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " @ token,
+                "Content-Type": "multipart/form-data; boundary=" @ boundary,
+                "Accept": "application/json"
+            },
+            body: body
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " @ registry_url @ ": " @ err;
+    }
+
+    if (resp == null) {
+        throw "Failed to connect to registry at " @ registry_url;
+    }
+
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        return resp.body;
+    }
+
+    let body_text = resp.body;
+    if (body_text == null) { body_text = ""; }
+    throw "Registry rejected upload (HTTP " @ resp.status_code @ "): " @ body_text;
+}
+
+// Create the package row before the first version upload. Tolerates a 409
+// from a race with another publisher (already exists). Throws on any other
+// non-2xx so the caller doesn't silently barrel into an upload that the
+// server will reject for a different reason.
+export func ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, token) {
+    let check_url = registry_url + "/api/packages/" + encoded_pkg_name;
+    let check_resp = null;
+    try {
+        check_resp = await http.get(check_url);
+    } catch (e) {
+        // treat transport failures as "unknown"
+        return;
+    }
+    if (check_resp != null && check_resp.status_code == 200) {
+        return;
+    }
+
+    print("  Package does not exist yet! Creating ...");
+    let body = "{\"name\":\"" @ pkg_name @ "\",\"description\":\"\"}";
+    let create_resp = null;
+    try {
+        create_resp = await http.get({
+            url: registry_url + "/api/packages",
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " @ token,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: body
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " @ registry_url @ ": " @ err;
+    }
+    if (create_resp == null) {
+        throw "Failed to connect to registry at " @ registry_url;
+    }
+    let sc = create_resp.status_code;
+    if (sc >= 200 && sc < 300) { return; }
+    // 409 = already exists (race with concurrent publisher) -> tolerate.
+    if (sc == 409) { return; }
+    let body_text = create_resp.body;
+    if (body_text == null) { body_text = ""; }
+    throw "Failed to create package " @ pkg_name @ " (HTTP " @ sc @ "): " @ body_text;
+}

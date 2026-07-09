@@ -1,0 +1,1785 @@
+#!/usr/bin/env /home/wearr/Documents/Coding/Nari/build/release/interpreter
+import Path from "./lib/path_utils.nari";
+import { Archive } from "std/archive";
+import Store from "./lib/store.nari";
+import Manifest from "./lib/manifest.nari";
+import LockfileReader from "./lib/lockfile_reader.nari";
+import { render_lockfile } from "./lib/lockfile.nari";
+import Workspace from "./lib/workspace.nari";
+import Publish from "./lib/publish.nari";
+
+func write_text(path, content) {
+    let parent = Path.dirname(path);
+    if (parent != "." && parent != "") {
+        fs.mkdir_all(parent);
+    }
+    return await fs.write_file(path, content);
+}
+
+// restrict a credentials file to owner-only on POSIX platforms
+func secure_credentials_path(path) {
+    if (platform.os == "windows") { return; }
+    let cmd = "chmod 600 " @ shell_escape_publish(path) @ " 2>/dev/null";
+    let code = system.exec(cmd);
+    if (code != 0) {
+        // Don't abort -- the file is still usable, just permissive.
+        // Surface enough info for the user to fix it manually.
+        print("warning: failed to chmod 600 " @ path @ " (exit " @ code @ "); " @
+              "set restrictive permissions manually");
+    }
+}
+
+// tighten ~/.nari/npkg to owner-only access
+func secure_credentials_dir(dir) {
+    if (platform.os == "windows") { return; }
+    let cmd = "chmod 700 " @ shell_escape_publish(dir) @ " 2>/dev/null";
+    system.exec(cmd);
+}
+
+func npkg_home_dir() {
+    let home = platform.getenv("HOME");
+    if (home == null) { return null; }
+    return Path.join_path(home, ".nari/npkg");
+}
+
+func npkg_credentials_path() {
+    let dir = npkg_home_dir();
+    if (dir == null) { return null; }
+    return Path.join_path(dir, "credentials");
+}
+
+func print_usage() {
+    print("npkg - Nari package manager");
+    print("Usage:");
+    print("  npkg init    [project_dir] [package_name] create a new project");
+    print("  npkg install [project_dir]                install all deps of a project");
+    print("  npkg install <pkg[@ver]> ...              add & install packages into .");
+    print("  npkg add     [project_dir] <name@version> add a dep and install");
+    print("  npkg update  [project_dir]                upgrade packages within constraints");
+    print("  npkg list    [project_dir]                show installed packages");
+    print("  npkg clean   [project_dir]                remove unused store entries");
+    print("  npkg publish [project_dir]                publish package to registry");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN)");
+    print("               --workspace                  publish every workspace member in topo order");
+    print("               --dry-run                    stage + archive, but skip upload");
+    print("               --allow-dirty                allow publishing with uncommitted git changes");
+    print("  npkg login   [--registry <url>]           log in and save credentials");
+    print("  npkg search  <query>                      search for packages on registry");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --page     <n>               page number (default: 1)");
+    print("  npkg unpublish <name>                     remove a package from the registry");
+    print("               --version  <v>               only delete this version (keep package)");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN)");
+    print("               --yes / -y                   skip the interactive y/N prompt");
+    print("  npkg owner ls  <name>                     list owners of a package");
+    print("  npkg owner add <name> <user>              grant <user> co-ownership of <name>");
+    print("  npkg owner rm  <name> <user>              remove <user> from owners of <name>");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN; add/rm only)");
+}
+
+func cli_args() {
+    let args = [];
+    let i = 0;
+    if (process.argv.length() > 0) {
+        if (process.argv[0].ends_with(".nari") || process.argv[0].ends_with(".naric")) {
+            i = 1;
+        } else {
+            i = 2;
+        }
+    }
+    while (i < process.argv.length()) {
+        args.push(process.argv[i]);
+        i++;
+    }
+    return args;
+}
+
+func arg_or(args, index, fallback) {
+    if (index < args.length()) {
+        return args[index];
+    }
+    return fallback;
+}
+
+func quote_string(value) {
+    return "\"" @ value.replace_all("\\", "\\\\").replace_all("\"", "\\\"") @ "\"";
+}
+
+func render_manifest(manifest) {
+    let lines = [];
+    lines.push("packageFormat = " @ manifest["packageFormat"]);
+    lines.push("name = " @ quote_string(manifest["name"]));
+    lines.push("version = " @ quote_string(manifest["version"]));
+    if (manifest.has_key("entry") && manifest["entry"] != null && manifest["entry"] != "") {
+        lines.push("entry = " @ quote_string(manifest["entry"]));
+    }
+    if (manifest.has_key("registries") && manifest["registries"] != null) {
+        let regs = manifest["registries"];
+        if (regs.length() > 0) {
+            let reg_items = [];
+            for (r in regs) {
+                reg_items.push(quote_string(r));
+            }
+            lines.push("registries = [" @ reg_items.join(", ") @ "]");
+        }
+    }
+    let dep_names = manifest["dependencies"].keys();
+    dep_names.sort();
+    if (dep_names.length() > 0) {
+        lines.push("");
+        lines.push("[dependencies]");
+        for (dep_name in dep_names) {
+            let spec = manifest["dependencies"][dep_name];
+            let spec_parts = [];
+            if (spec.has_key("version")) {
+                spec_parts.push("version = " @ spec["version"]);
+            } else if (spec.has_key("path")) {
+                spec_parts.push("path = " @ quote_string(spec["path"]));
+            }
+            lines.push(quote_string(dep_name) @ " = { " @ spec_parts.join(", ") @ " }");
+        }
+    }
+    return lines.join("\n") @ "\n";
+}
+
+func render_init_manifest(package_name) {
+    return "packageFormat = 1\n" @
+        "name = \"" @ package_name @ "\"\n" @
+        "version = \"0.1.0\"\n" @
+        "entry = \"src/main.nari\"\n";
+}
+
+func render_init_entry(package_name) {
+    return "print(\"Hello from " @ package_name @ "!\");\n";
+}
+
+func command_init(args) {
+    let project_dir = Path.normalize_path(arg_or(args, 1, "."));
+    let package_name = arg_or(args, 2, "example/app");
+    let manifest_path = Path.join_path(project_dir, "nari.toml");
+    let entry_path = Path.join_path(project_dir, "src/main.nari");
+
+    fs.mkdir_all(project_dir);
+    fs.mkdir_all(Path.dirname(entry_path));
+
+    if (await fs.file_exists(manifest_path)) {
+        throw "Refusing to overwrite existing manifest at " @ manifest_path;
+    }
+
+    write_text(manifest_path, render_init_manifest(package_name));
+    if (!await fs.file_exists(entry_path)) {
+        write_text(entry_path, render_init_entry(package_name));
+    }
+
+    print("Created project at " @ project_dir);
+    print("Manifest: " @ manifest_path);
+}
+
+// Returns true if a CLI argument looks like a file-system path rather than a
+// package name / spec.  Paths begin with /, ./, ../, or ~ .
+func looks_like_path(s) {
+    return s.starts_with("/") || s.starts_with("./") || s.starts_with("../") || s.starts_with("~");
+}
+
+func command_install(args) {
+    // Distinguish two forms:
+    //   npkg install [<dir>]          - install all deps of a project
+    //   npkg install <pkg[@ver]>      - add & install named packages into .
+    let project_dir = ".";
+    let pkg_specs = [];
+
+    if (args.length() > 1) {
+        if (looks_like_path(args[1])) {
+            project_dir = args[1];
+        } else {
+            // everything after "install" treated as package specs
+            let i = 1;
+            while (i < args.length()) {
+                pkg_specs.push(args[i]);
+                i++;
+            }
+        }
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    // if bare package specs were given, resolve+add them to the manifest first
+    if (pkg_specs.length() > 0) {
+        let manifest = Manifest.load_manifest(project_dir);
+        let registries = manifest["registries"];
+        if (registries == null) { registries = []; }
+        for (spec in pkg_specs) {
+            let at_pos = spec.last_index_of("@");
+            let pkg_name = spec;
+            let requirement = "*";
+            if (at_pos > 0) {
+                pkg_name = spec.substr(0, at_pos);
+                requirement = spec.substr(at_pos + 1, spec.length());
+            }
+            let resolved_version = Store.query_latest_version(pkg_name, requirement, registries);
+            manifest["dependencies"][pkg_name] = { version: resolved_version };
+            print("Adding " + pkg_name + "@" + resolved_version + " to manifest");
+        }
+        let manifest_path = Path.join_path(project_dir, "nari.toml");
+        write_text(manifest_path, render_manifest(manifest));
+    }
+
+    // workspace-aware lockfile placement:
+    // when the user runs `npkg install` inside a member dir,
+    // the canonical lockfile lives at the workspace root, so all members share resolution.
+    let workspace_for_lockfile = Workspace.discover_from(project_dir);
+    let lockfile_dir = project_dir;
+    let entry_required = true;
+    if (workspace_for_lockfile != null) {
+        lockfile_dir = workspace_for_lockfile["rootDir"];
+        // virtual workspace roots have no entry, packageable roots do.
+        entry_required = !workspace_for_lockfile["isVirtual"];
+    }
+    let lockfile_path = Path.join_path(lockfile_dir, "nari.lock.toml");
+
+    if (await fs.file_exists(lockfile_path)) {
+        let existing_text = await fs.read_file(lockfile_path);
+        if (existing_text != null) {
+            try {
+                let existing_lockfile = LockfileReader.parse_lockfile(existing_text);
+                let check_manifest = Manifest.load_manifest(lockfile_dir);
+                Manifest.validate_manifest(check_manifest, entry_required);
+                if (!Store.is_lockfile_stale(check_manifest, existing_lockfile)) {
+                    if (Store.all_packages_in_store(existing_lockfile)) {
+                        let names = existing_lockfile["packages"].keys();
+                        names.sort();
+                        for (name in names) {
+                            let pkg = existing_lockfile["packages"][name];
+                            print("  " + name + "@" + pkg["version"] + " (cached)");
+                        }
+                        print("All packages up to date.");
+                        return;
+                    }
+                    print("Some packages missing from store, re-resolving...");
+                } else {
+                    print("Lockfile out of date, re-resolving...");
+                }
+            } catch (err) {
+                print("Warning: could not verify lockfile: " @ err);
+            }
+        }
+    }
+
+    // resolve from the workspace root if present so every member is included.
+    let resolve_root = lockfile_dir;
+    let resolution = Store.resolve_project(resolve_root);
+    let lockfile_content = render_lockfile(
+        resolution["root"],
+        resolution["packages"],
+        resolution["workspace"],
+        resolution["members"]
+    );
+    write_text(lockfile_path, lockfile_content);
+
+    print("Wrote lockfile: " @ lockfile_path);
+    let names = resolution["packages"].keys();
+    names.sort();
+    for (name in names) {
+        let pkg = resolution["packages"][name];
+        print("Installed " @ pkg["name"] @ "@" @ pkg["version"] @ " -> " @ pkg["storePath"]);
+    }
+}
+
+func command_add(args) {
+    let project_dir = ".";
+    let pkg_spec = null;
+
+    if (args.length() == 2) {
+        pkg_spec = args[1];
+    } else if (args.length() >= 3) {
+        project_dir = args[1];
+        pkg_spec = args[2];
+    } else {
+        throw "Usage: npkg add [project_dir] <name@version>";
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    let at_pos = pkg_spec.last_index_of("@");
+    if (at_pos <= 0) {
+        throw "Invalid package spec, expected name@version: " + pkg_spec;
+    }
+
+    let pkg_name = pkg_spec.substr(0, at_pos);
+    let pkg_version = pkg_spec.substr(at_pos + 1, pkg_spec.length());
+
+    if (pkg_name == "" || pkg_version == "") {
+        throw "Invalid package spec: " @ pkg_spec;
+    }
+
+    let manifest = Manifest.load_manifest(project_dir);
+    manifest["dependencies"][pkg_name] = { version: pkg_version };
+
+    let manifest_path = Path.join_path(project_dir, "nari.toml");
+    write_text(manifest_path, render_manifest(manifest));
+    print("Added " @ pkg_name @ " @ " @ pkg_version @ " to " @ manifest_path);
+
+    let install_args = ["add", project_dir];
+    command_install(install_args);
+}
+
+func print_pkg_tree(pkg_name, packages, visited, prefix, is_last) {
+    if (visited.has_key(pkg_name)) {
+        print(prefix @ (is_last ? "+-- " : "+-- ") @ pkg_name @ " (already shown)");
+        return;
+    }
+    visited[pkg_name] = true;
+
+    if (!packages.has_key(pkg_name)) {
+        print(prefix @ (is_last ? "+-- " : "+-- ") @ pkg_name @ " (missing from lockfile)");
+        return;
+    }
+
+    let pkg = packages[pkg_name];
+    let label = pkg_name + "@" + pkg["version"] + "  (" + pkg["source"] + ")";
+    print(prefix + (is_last ? "+-- " : "+-- ") + label);
+
+    let child_prefix = prefix @ (is_last ? "    " : "|   ");
+    let dep_names = pkg["dependencies"].keys();
+    dep_names.sort();
+    let n = dep_names.length();
+    let i = 0;
+    for (dep_name in dep_names) {
+        i++;
+        print_pkg_tree(dep_name, packages, visited, child_prefix, i == n);
+    }
+}
+
+// print one dep tree for a single manifest using `packages` from the lockfile as the resolution table.
+func print_manifest_tree(manifest, packages) {
+    let header = manifest["name"] + "@" @ manifest["version"];
+    print(header);
+
+    let direct_names = manifest["dependencies"].keys();
+    direct_names.sort();
+
+    let visited = {};
+    let n = direct_names.length();
+    let i = 0;
+    for (dep_name in direct_names) {
+        i++;
+        print_pkg_tree(dep_name, packages, visited, "", i == n);
+    }
+}
+
+func command_list(args) {
+    let project_dir = Path.normalize_path(arg_or(args, 1, "."));
+
+    // search upward so `npkg list` works from any workspace member, not just the root.
+    let workspace = Workspace.discover_from(project_dir);
+    let lockfile_dir = project_dir;
+    if (workspace != null) {
+        lockfile_dir = workspace["rootDir"];
+    }
+    let lockfile_path = Path.join_path(lockfile_dir, "nari.lock.toml");
+
+    if (!await fs.fileExists(lockfile_path)) {
+        throw "No lockfile found at " + lockfile_path + ". Run `npkg install` first!";
+    }
+
+    let lockfile_text = await fs.readFile(lockfile_path);
+    if (lockfile_text == null) {
+        throw "Could not read lockfile at " + lockfile_path;
+    }
+
+    let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+    let packages = lockfile["packages"];
+
+    if (workspace != null) {
+        let root_manifest = workspace["rootManifest"];
+        if (workspace["isVirtual"]) {
+            print("workspace: " + workspace["rootDir"]);
+        } else {
+            print("workspace: " + root_manifest["name"] + "@" + root_manifest["version"]);
+        }
+        print("");
+
+        let members = workspace["members"];
+        let i = 0;
+        while (i < members.length()) {
+            let m = members[i];
+            print_manifest_tree(m, packages);
+            if (i < members.length() - 1) {
+                print("");
+            }
+            i++;
+        }
+        return;
+    }
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, false);
+    print_manifest_tree(manifest, packages);
+}
+
+// extract a JSON string value by key name (simple parser, no nested objects)
+func extract_json_string(json_text, key) {
+    let search = "\"" + key + "\"";
+    let pos = json_text.index_of(search);
+    if (pos == -1) { return null; }
+    pos = pos + search.length();
+    // Skip whitespace and colon
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (c == " " || c == ":" || c == "\t") {
+            pos++;
+        } else {
+            break;
+        }
+    }
+    if (pos >= json_text.length() || json_text.char_at(pos) != "\"") { return null; }
+    pos++; // skip opening quote
+    let result = "";
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (c == "\"") { break; }
+        if (c == "\\" && pos + 1 < json_text.length()) {
+            pos++;
+            result = result @ json_text.char_at(pos);
+        } else {
+            result = result @ c;
+        }
+        pos++;
+    }
+    return result;
+}
+
+// extract a JSON numeric (or boolean/null) value by key name.
+// Returns the raw token as a string (e.g. "42"), or null if not found.
+func extract_json_number(json_text, key) {
+    let search = "\"" @ key @ "\"";
+    let pos = json_text.index_of(search);
+    if (pos == -1) { return null; }
+    pos = pos + search.length();
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (c == " " || c == ":" || c == "\t") { pos++; } else { break; }
+    }
+    if (pos >= json_text.length()) { return null; }
+    let result = "";
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (c == "," || c == "}" || c == "]" || c == " " || c == "\n" || c == "\r" || c == "\t") { break; }
+        result = result @ c;
+        pos++;
+    }
+    if (result == "") { return null; }
+    return result;
+}
+
+// Extract the raw contents (between [ and ]) of a JSON array field.
+// Returns null if not found or if the value is not an array.
+func extract_json_array(json_text, key) {
+    let search = "\"" @ key @ "\"";
+    let pos = json_text.index_of(search);
+    if (pos == -1) { return null; }
+    pos = pos + search.length();
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (c == " " || c == ":" || c == "\t") { pos++; } else { break; }
+    }
+    if (pos >= json_text.length() || json_text.char_at(pos) != "[") { return null; }
+    pos++; // skip opening [
+    let depth = 1;
+    let start = pos;
+    let in_string = false;
+    while (pos < json_text.length()) {
+        let c = json_text.char_at(pos);
+        if (in_string) {
+            if (c == "\\") { pos++; }
+            else if (c == "\"") { in_string = false; }
+        } else {
+            if (c == "\"") { in_string = true; }
+            else if (c == "[") { depth++; }
+            else if (c == "]") {
+                depth--;
+                if (depth == 0) { return json_text.substr(start, pos); }
+            }
+        }
+        pos++;
+    }
+    return null;
+}
+
+// Split a JSON array body (contents between [ and ]) into individual object strings.
+// Handles nested objects and strings correctly.
+func split_json_objects(array_text) {
+    let items = [];
+    let i = 0;
+    let n = array_text.length();
+    while (i < n) {
+        let c = array_text.char_at(i);
+        if (c == "{") {
+            let depth = 0;
+            let start = i;
+            let in_string = false;
+            while (i < n) {
+                let ch = array_text.char_at(i);
+                if (in_string) {
+                    if (ch == "\\") { i++; }
+                    else if (ch == "\"") { in_string = false; }
+                } else {
+                    if (ch == "\"") { in_string = true; }
+                    else if (ch == "{") { depth++; }
+                    else if (ch == "}") {
+                        depth--;
+                        if (depth == 0) {
+                            items.push(array_text.substr(start, i + 1));
+                            i++;
+                            break;
+                        }
+                    }
+                }
+                i++;
+            }
+        } else {
+            i++;
+        }
+    }
+    return items;
+}
+
+// Load NPKG_TOKEN from ~/.nari/npkg/credentials if not already set in the environment.
+func load_credentials() {
+    let token = platform.getenv("NPKG_TOKEN");
+    if (token != null && token != "") { return token; }
+    let creds_path = npkg_credentials_path();
+    if (!creds_path || !await fs.file_exists(creds_path)) {
+        return null;
+    }
+    secure_credentials_dir(npkg_home_dir());
+    secure_credentials_path(creds_path);
+    let text = await fs.read_file(creds_path);
+    if (text == null) { return null; }
+    let lines = text.split("\n");
+    for (line in lines) {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("NPKG_TOKEN=")) {
+            return trimmed.substr(11, trimmed.length());
+        }
+    }
+    return null;
+}
+
+func load_saved_registry() {
+    let registry_url = platform.getenv("NPKG_REGISTRY");
+    if (registry_url != null && registry_url != "") { return registry_url; }
+    let creds_path = npkg_credentials_path();
+    if (!creds_path || !await fs.file_exists(creds_path)) { return null; }
+    let text = await fs.read_file(creds_path);
+    if (text == null) { return null; }
+    let lines = text.split("\n");
+    for (line in lines) {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("NPKG_REGISTRY=")) {
+            return trimmed.substr(14, trimmed.length());
+        }
+    }
+    return null;
+}
+
+func normalize_registry_api_url(registry_url) {
+    if (registry_url == null || registry_url == "") {
+        return null;
+    }
+    let url = registry_url.trim();
+    if (url.ends_with("/registry/index.toml")) {
+        url = url.substr(0, url.length() - 20);
+    } else if (url.ends_with("/index.toml")) {
+        url = url.substr(0, url.length() - 11);
+    } else if (url.ends_with("/registry")) {
+        url = url.substr(0, url.length() - 9);
+    }
+    if (url.ends_with("/")) {
+        url = url.substr(0, url.length() - 1);
+    }
+    return url;
+}
+
+func resolve_registry_url(override_url, manifest) {
+    let registry_url = override_url;
+    if (registry_url == null || registry_url == "") {
+        registry_url = load_saved_registry();
+    }
+    if ((registry_url == null || registry_url == "") && manifest != null) {
+        let regs = manifest.has_key("registries") ? manifest["registries"] : [];
+        if (regs.length() > 0) {
+            registry_url = regs[0];
+        }
+    }
+    if (registry_url == null || registry_url == "") {
+        registry_url = "https://npkg.org/";
+    }
+    return normalize_registry_api_url(registry_url);
+}
+
+func command_login(args) {
+    let registry_url = null;
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else {
+            throw "Unknown argument: " @ arg;
+        }
+        i++;
+    }
+
+    registry_url = resolve_registry_url(registry_url, null);
+
+    let session_resp = null;
+    try {
+        print(registry_url);
+        session_resp = await http.get({
+            url: registry_url + "/api/auth/cli-session",
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: "{}"
+        });
+    } catch (e) {
+        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
+    }
+    if (session_resp == null) {
+        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
+    }
+    let session_sc = session_resp.status_code;
+    if (session_sc < 200 || session_sc >= 300) {
+        let err_body = session_resp.body;
+        if (err_body == null) { err_body = ""; }
+        throw "Failed to create CLI session (HTTP " @ session_sc @ "): " @ err_body;
+    }
+    let session_text = session_resp.body;
+    if (session_text == null) { throw "Empty session response from registry."; }
+
+    let session_id = extract_json_string(session_text, "sessionId");
+    let login_url  = extract_json_string(session_text, "loginUrl");
+    if (session_id == null || login_url == null) {
+        throw "Unexpected session response: " @ session_text;
+    }
+
+    print("");
+    print("Open this URL in your browser to authorize:");
+    print("  " @ login_url);
+    print("");
+    // Best-effort browser open
+    system.exec("xdg-open " @ shell_escape_publish(login_url) @ " 2>/dev/null || open " @ shell_escape_publish(login_url) @ " 2>/dev/null || true");
+
+    // Poll until completed or timed out (max ~2 minutes, 2 s interval)
+    print("Waiting for browser authorization (Ctrl-C to cancel)...");
+    let poll_url = registry_url @ "/api/auth/cli-session/" @ session_id;
+    let max_polls = 60;
+    let polls = 0;
+    let api_key = null;
+
+    while (polls < max_polls) {
+        system.exec("sleep 2");
+        polls++;
+
+        let resp = await http.get(poll_url);
+        if (resp == null) { continue; }
+        if (resp.status_code == 410) {
+            throw "Login session expired. Run `npkg login` again.";
+        }
+        if (resp.status_code >= 200 && resp.status_code < 300) {
+            let body = resp.body;
+            if (body.index_of("\"completed\"") != -1) {
+                api_key = extract_json_string(body, "apiKey");
+                break;
+            }
+        }
+    }
+
+    if (api_key == null) {
+        throw "Login timed out. Run `npkg login` again.";
+    }
+
+    // Save credentials to ~/.nari/npkg/credentials
+    let creds_dir = npkg_home_dir();
+    if (creds_dir == null) {
+        throw "HOME is not set; cannot save credentials.";
+    }
+    fs.mkdir_all(creds_dir);
+    secure_credentials_dir(creds_dir);
+
+    let creds_path = Path.join_path(creds_dir, "credentials");
+    write_text(creds_path, "NPKG_TOKEN=" @ api_key @ "\nNPKG_REGISTRY=" @ registry_url @ "\n");
+    secure_credentials_path(creds_path);
+
+    print("Logged in! Credentials saved to ~/.nari/npkg/credentials");
+    print("Key prefix: " @ api_key.substr(0, 13) @ "...");
+}
+
+// Percent-encode a string for use as a URL path component.
+// Leaves unreserved chars (A-Z a-z 0-9 - _ . ~) as-is; encodes everything else.
+func url_encode_component(text) {
+    let HEX = "0123456789ABCDEF";
+    let out = "";
+    let i = 0;
+    while (i < text.length()) {
+        let c = text.char_at(i);
+        let code = text.char_code_at(i);
+        let unreserved = (code >= 65 && code <= 90) ||
+                         (code >= 97 && code <= 122) ||
+                         (code >= 48 && code <= 57) ||
+                         c == "-" || c == "_" || c == "." || c == "~";
+        if (unreserved) {
+            out = out @ c;
+        } else {
+            let lo = code % 16;
+            let hi = (code - lo) / 16;
+            out = out @ "%" @ HEX.char_at(hi) @ HEX.char_at(lo);
+        }
+        i++;
+    }
+    return out;
+}
+
+func shell_escape_publish(text) {
+    return "'" @ text.replace_all("'", "'\\''") @ "'";
+}
+
+func run_cmd(command) {
+    let code = system.exec(command);
+    if (code != 0) {
+        throw "Command failed (exit " @ code @ "): " @ command;
+    }
+}
+
+// Rewrite a dep line: `workspace = true` becomes a concrete registry dep
+// using `version_overrides[name]`. Deps not in the map pass through.
+//   { workspace = true }              -> "<version>"
+//   { version = "X", workspace = true } -> { version = "X" }
+//   "X" (no workspace marker)         -> unchanged
+func rewrite_publish_dep_line(line, version_overrides) {
+    let trimmed = line.trim();
+    if (trimmed == "" || trimmed.starts_with("#")) { return line; }
+
+    // split key = value at the first unquoted '='.
+    let eq = -1;
+    let in_quotes = false;
+    let j = 0;
+    while (j < line.length()) {
+        let c = line.char_at(j);
+        if (c == "\"") { in_quotes = !in_quotes; }
+        else if (c == "=" && !in_quotes) { eq = j; break; }
+        j++;
+    }
+    if (eq == -1) { return line; }
+
+    let raw_key = line.substr(0, eq).trim();
+    let value = line.substr(eq + 1, line.length() - eq - 1).trim();
+
+    // Unquote key (TOML keys may be bare or quoted).
+    let key = raw_key;
+    if (key.length() >= 2 && key.char_at(0) == "\"" && key.char_at(key.length() - 1) == "\"") {
+        key = key.substr(1, key.length() - 2);
+    }
+
+    if (!version_overrides.has_key(key)) { return line; }
+    let pinned = version_overrides[key];
+
+    // If the value is not an inline table, leave it alone (already a pinned version string).
+    if (!(value.length() >= 2 && value.char_at(0) == "{" && value.char_at(value.length() - 1) == "}")) {
+        return line;
+    }
+
+    let inner = value.substr(1, value.length() - 2).trim();
+    if (inner.index_of("workspace") == -1) { return line; }
+
+    // Re-emit a clean inline table or bare version
+    let key_out = "\"" @ key @ "\"";
+    return key_out @ " = \"" @ pinned @ "\"";
+}
+
+// Rewrite a manifest's text so any workspace = true dependencies become resolved version-pinned entries suitable for upload.
+func rewrite_manifest_for_publish(text, version_overrides) {
+    let lines = text.split("\n");
+    let in_deps = false;
+    let result = [];
+    let i = 0;
+    while (i < lines.length()) {
+        let line = lines[i];
+        let stripped = line.trim();
+        if (stripped.length() >= 2 && stripped.char_at(0) == "[" && stripped.char_at(stripped.length() - 1) == "]") {
+            let header = stripped.substr(1, stripped.length() - 2).trim();
+            in_deps = (header == "dependencies");
+            result.push(line);
+        } else if (in_deps) {
+            result.push(rewrite_publish_dep_line(line, version_overrides));
+        } else {
+            result.push(line);
+        }
+        i++;
+    }
+    return result.join("\n");
+}
+
+// Topologically sort workspace members so producers come before consumers.
+// Cross-member edges are introduced by deps whose name matches another
+// member; non-workspace deps are ignored. Throws on cycles.
+func topo_sort_workspace_members(members) {
+    let by_name = {};
+    for (m in members) { by_name[m["name"]] = m; }
+
+    let visited = {};   // name -> "done"
+    let visiting = {};  // name -> true (cycle detection)
+    let order = [];
+
+    let visit = null;
+    visit = func(name) {
+        if (visited.has_key(name)) { return; }
+        if (visiting.has_key(name)) {
+            throw "Workspace dependency cycle detected at member " + name;
+        }
+        visiting[name] = true;
+        let cur = by_name[name];
+        let dep_names = cur["dependencies"].keys();
+        for (dep_name in dep_names) {
+            if (by_name.has_key(dep_name)) {
+                visit(dep_name);
+            }
+        }
+        visited[name] = "done";
+        order.push(cur);
+    };
+
+    for (m in members) { visit(m["name"]); }
+    return order;
+}
+
+// Publish one manifest. `project_dir` is where the manifest lives.
+func publish_warn(msg) { print("  warning: " + msg); }
+
+func publish_one_manifest(manifest, project_dir, registry_url, token, version_overrides, dry_run, allow_dirty) {
+    let pkg_name = manifest["name"];
+    let encoded_pkg_name = url_encode_component(pkg_name);
+    let safe_pkg_name = pkg_name.replace_all("/", "-").replace_all("@", "");
+    let version = manifest["version"];
+
+    let dry_prefix = "";
+    if (dry_run) { dry_prefix = "(dry-run) "; }
+
+    print(dry_prefix + "Publishing " + pkg_name + "@" + version + " to " + registry_url + " ...");
+
+    Publish.validate_package_name(pkg_name);
+    Publish.validate_version_string(version);
+
+    let git_state = Publish.detect_git_state(project_dir);
+    if (git_state == "dirty") {
+        if (allow_dirty) {
+            publish_warn("project has uncommitted changes (continuing because --allow-dirty was given)");
+        } else {
+            let dirty_summary = Publish.summarize_dirty_files(project_dir, 5);
+            let msg = "Refusing to publish " + pkg_name + "@" + version +
+                ": project has uncommitted changes. Commit or pass --allow-dirty.";
+            if (dirty_summary != "") {
+                msg = msg + "\n  Uncommitted files:\n" + dirty_summary;
+            }
+            throw msg;
+        }
+    }
+
+    Publish.warn_recommended_fields(manifest, project_dir, publish_warn);
+
+    // Preflight: does the version already exist? If yes, no point archiving.
+    // We skip on dry runs so users can rehearse a re-publish locally.
+    if (!dry_run && Publish.remote_version_exists(registry_url, pkg_name, version)) {
+        throw "Version " + pkg_name + "@" + version + " already exists on " + registry_url;
+    }
+
+    let home = platform.getenv("HOME");
+    let tmp_dir = Path.join_path(home, ".nari/cache/npkg-publish/" + safe_pkg_name + "-" + version);
+    let archive_path = Path.join_path(tmp_dir, "package.tar.gz");
+
+    if (await fs.file_exists(tmp_dir)) {
+        system.exec("rm -rf " + shell_escape_publish(tmp_dir));
+    }
+    fs.mkdir_all(tmp_dir);
+
+    // Build the file list directly from the source tree, filtered by the ignore rules.
+    let ignore_patterns = Publish.load_ignore_patterns(project_dir);
+    let entries = Publish.walk_files_for_archive(project_dir, ignore_patterns);
+    if (entries.length() == 0) {
+        throw "Refusing to publish " + pkg_name + ": no files would be included (all paths matched ignore rules?)";
+    }
+
+    if (version_overrides != null && version_overrides.keys().length() > 0) {
+        let orig_manifest_path = Path.join_path(project_dir, "nari.toml");
+        let original = await fs.read_file(orig_manifest_path);
+        if (original == null) {
+            throw "Could not read manifest at " + orig_manifest_path;
+        }
+        let rewritten = rewrite_manifest_for_publish(original, version_overrides);
+        if (rewritten != original) {
+            let rewritten_path = Path.join_path(tmp_dir, "nari.toml.rewritten");
+            await fs.writeFile(rewritten_path, rewritten);
+
+            let j = 0;
+            let swapped = false;
+            while (j < entries.length()) {
+                if (entries[j]["dest"] == "nari.toml") {
+                    entries[j] = {src: rewritten_path, dest: "nari.toml"};
+                    swapped = true;
+                }
+                j++;
+            }
+            if (!swapped) {
+                // if the manifest somehow got ignored or not found, add it explicitly
+                entries.push({src: rewritten_path, dest: "nari.toml"});
+            }
+            print("  Rewrote workspace deps to pinned versions");
+        }
+    }
+
+    print("  Creating archive (" + entries.length() + " files) ...");
+    Archive.create(archive_path, entries, {format: "tar.gz"});
+
+    let report = Publish.archive_report(archive_path);
+    print("  Archive: " + report["size_human"] + ", " + report["files"] + " files, sha256=" + _short_hash(report["sha256"]));
+    Publish.enforce_archive_size(report["bytes"], pkg_name);
+
+    if (dry_run) {
+        print("  Dry run: archive prepared at " + archive_path);
+        print("  Skipping registry upload.");
+        // Leave the archive on disk so the user can inspect it.
+        return;
+    }
+
+    // Ensure the package row exists (tolerates 409 from concurrent create).
+    Publish.ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, token);
+
+    print("  Uploading version " + version + " ...");
+    let response_text = "";
+    let upload_err = null;
+    try {
+        response_text = Publish.upload_archive(
+            registry_url, encoded_pkg_name, version, token, archive_path
+        );
+    } catch (e) {
+        upload_err = e;
+    }
+
+    // Always clean the publish scratch directory, success or failure.
+    system.exec("rm -rf " + shell_escape_publish(tmp_dir));
+
+    if (upload_err != null) {
+        throw "Upload failed for " + pkg_name + "@" + version + ": " + upload_err;
+    }
+
+    // Parse the registry response and fail loudly if it doesn't match the
+    // success shape. This catches HTML error pages, empty bodies, and
+    // jsonErr-shaped 4xx responses uniformly. (upload_archive only returns
+    // on 2xx, but the body shape itself can still be wrong.)
+    let parsed = Publish.parse_upload_response(response_text);
+    if (!parsed["ok"]) {
+        throw "Upload rejected by registry for " + pkg_name + "@" + version + ": " + parsed["error_message"];
+    }
+
+    print("Done! Published " + pkg_name + "@" + version + " (integrity=" + _short_hash(parsed["integrity"]) + ").");
+}
+
+// Short hash for human-readable progress lines. Keep the full hash in the
+// archive_report record so tests can still assert on the exact digest.
+func _short_hash(h) {
+    if (h == null || h == "") { return "?"; }
+    if (h.length() <= 16) { return h; }
+    return h.substr(0, 16) + "...";
+}
+
+func command_publish(args) {
+    // publish [project_dir] [--registry <url>] [--token <key>] [--workspace] [--dry-run]
+    let project_dir = ".";
+    let registry_url = null;
+    let token = null;
+    let workspace_mode = false;
+    let dry_run = false;
+    let allow_dirty = false;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { throw "--token requires a value"; }
+            token = args[i];
+        } else if (arg == "--workspace" || arg == "--all") {
+            workspace_mode = true;
+        } else if (arg == "--dry-run" || arg == "-n") {
+            dry_run = true;
+        } else if (arg == "--allow-dirty") {
+            allow_dirty = true;
+        } else if (!arg.starts_with("-")) {
+            project_dir = arg;
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    if (token == null) {
+        token = load_credentials();
+    }
+    if (!dry_run && (token == null || token == "")) {
+        throw "No API token provided. Use --token <key> or set the NPKG_TOKEN environment variable.";
+    }
+
+    if (workspace_mode) {
+        let workspace = Workspace.discover_from(project_dir);
+        if (workspace == null) {
+            throw "--workspace requires a [workspace] table; no workspace found from " + project_dir;
+        }
+
+        let members = workspace["members"];
+        if (members.length() == 0) {
+            throw "Workspace has no members to publish";
+        }
+
+        let order = topo_sort_workspace_members(members);
+
+        let version_overrides = {};
+        for (m in members) {
+            version_overrides[m["name"]] = m["version"];
+        }
+
+        let registry_anchor_manifest = workspace["rootManifest"];
+        if (!Manifest.has_package(registry_anchor_manifest) && !registry_anchor_manifest.has_key("registries")) {
+            registry_anchor_manifest = members[0];
+        }
+        let resolved_registry = resolve_registry_url(registry_url, registry_anchor_manifest);
+
+        print("Publishing workspace (" + order.length() + " members) to " + resolved_registry);
+        let idx = 0;
+        while (idx < order.length()) {
+            let m = order[idx];
+            print("");
+            print("[" + (idx + 1) + "/" + order.length() + "] " + m["name"]);
+            publish_one_manifest(m, m["rootDir"], resolved_registry, token, version_overrides, dry_run, allow_dirty);
+            idx++;
+        }
+        print("");
+        if (dry_run) {
+            print("Dry run complete: " + order.length() + " member(s) staged.");
+        } else {
+            print("Workspace publish complete: " + order.length() + " member(s).");
+        }
+        return;
+    }
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, false);
+    let resolved_registry = resolve_registry_url(registry_url, manifest);
+    publish_one_manifest(manifest, project_dir, resolved_registry, token, {}, dry_run, allow_dirty);
+}
+
+func command_update(args) {
+    let project_dir = Path.normalize_path(arg_or(args, 1, "."));
+    let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, true);
+    let registries = manifest["registries"];
+    if (registries == null) { registries = []; }
+
+    // read currently locked versions (if any)
+    let locked_versions = {};
+    if (await fs.file_exists(lockfile_path)) {
+        let lockfile_text = await fs.readFile(lockfile_path);
+        if (lockfile_text != null) {
+            try {
+                let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+                let pkg_names = lockfile["packages"].keys();
+                for (pkg_name in pkg_names) {
+                    locked_versions[pkg_name] = lockfile["packages"][pkg_name]["version"];
+                }
+            } catch (err) {
+                print("Warning: could not read lockfile: " + err);
+            }
+        }
+    }
+
+    // Check each registry dep for a newer satisfying version
+    let upgrades_found = false;
+    let dep_names = manifest["dependencies"].keys();
+    dep_names.sort();
+    for (dep_name in dep_names) {
+        let spec = manifest["dependencies"][dep_name];
+        if (!spec.has_key("version")) {
+            continue; // path dep, skip
+        }
+        let constraint = spec["version"];
+        let current = locked_versions.has_key(dep_name) ? locked_versions[dep_name] : null;
+        try {
+            let latest = Store.query_latest_version(dep_name, constraint, registries);
+            if (current == null) {
+                print("  " + dep_name + ": (not installed) -> " + latest);
+                upgrades_found = true;
+            } else if (latest != current) {
+                print("  " + dep_name + ": " + current + " -> " + latest);
+                upgrades_found = true;
+            } else {
+                print("  " + dep_name + "@" + current + " (up to date)");
+            }
+        } catch (err) {
+            print("  " + dep_name + ": could not check - " + err);
+        }
+    }
+
+    if (!upgrades_found) {
+        print("All packages are up to date.");
+        return;
+    }
+
+    // Delete lockfile to force full re-resolution with latest versions
+    if (await fs.file_exists(lockfile_path)) {
+        await fs.deleteFile(lockfile_path);
+    }
+
+    let install_args = ["update", project_dir];
+    command_install(install_args);
+}
+
+func command_clean(args) {
+    let project_dir = Path.normalize_path(arg_or(args, 1, "."));
+    let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
+
+    if (!await fs.file_exists(lockfile_path)) {
+        throw "No lockfile found at " + lockfile_path + ". Run `npkg install` first.";
+    }
+
+    let lockfile_text = await fs.read_file(lockfile_path);
+    if (lockfile_text == null) {
+        throw "Could not read lockfile at " + lockfile_path;
+    }
+
+    let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+
+    let referenced = {};
+    let pkg_names = lockfile["packages"].keys();
+    for (pkg_name in pkg_names) {
+        let store_path = lockfile["packages"][pkg_name]["storePath"];
+        referenced[store_path] = true;
+    }
+
+    let removed = Store.clean_store(referenced);
+    if (removed == 0) {
+        print("Store is clean, nothing to remove.");
+    } else {
+        print("Removed " + removed + " unused package(s) from store.");
+    }
+}
+
+func command_search(args) {
+    let query = "";
+    let registry_url = null;
+    let page = 1;
+    let per_page = 20;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--page" || arg == "-p") {
+            i++;
+            if (i >= args.length()) { throw "--page requires a value"; }
+            page = args[i];
+        } else if (arg == "--per-page") {
+            i++;
+            if (i >= args.length()) { throw "--per-page requires a value"; }
+            per_page = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (query == "") {
+                query = arg;
+            } else {
+                query = query @ " " @ arg;
+            }
+        } else {
+            throw "Unknown argument: " @ arg;
+        }
+        i++;
+    }
+
+    if (query == "") {
+        throw "Usage: npkg search <query> [--registry <url>] [--page <n>]";
+    }
+
+    registry_url = resolve_registry_url(registry_url, null);
+
+    let encoded_query = url_encode_component(query);
+    let url = registry_url + "/api/packages?q=" + encoded_query + "&page=" + page + "&per_page=" + per_page;
+
+    let resp = await http.get(url);
+    if (resp == null) {
+        throw "Failed to connect to registry at " + registry_url;
+    }
+    if (resp.status_code != 200) {
+        throw "Registry returned error " + resp.status_code;
+    }
+
+    let body = resp.body;
+
+    let total_str = extract_json_number(body, "total");
+    let total = "0";
+    if (total_str != null) { total = total_str; }
+
+    let array_text = extract_json_array(body, "packages");
+    if (array_text == null || array_text.trim() == "") {
+        print("No packages found matching '" + query + "'.");
+        return;
+    }
+
+    let pkg_objects = split_json_objects(array_text);
+    if (pkg_objects.length() == 0) {
+        print("No packages found matching '" + query + "'.");
+        return;
+    }
+
+    print("Found " + total + " result(s) for '" + query + "':");
+    print("");
+
+    for (pkg_obj in pkg_objects) {
+        let name = extract_json_string(pkg_obj, "name");
+        let description = extract_json_string(pkg_obj, "description");
+        let owner = extract_json_string(pkg_obj, "ownerName");
+        let downloads = extract_json_number(pkg_obj, "weeklyDownloads");
+
+        if (name == null) { continue; }
+        if (description == null) { description = ""; }
+        if (owner == null) { owner = ""; }
+        if (downloads == null) { downloads = "0"; }
+
+        print("  " + name + " (by " + owner + ")");
+        if (description != "") {
+            print("    " + description);
+        }
+        if (downloads != "0") {
+            print("    " + downloads + " downloads this week");
+        }
+    }
+
+    print("");
+    // only add pages if there are more pages
+    let page_n = parse_int_or(page, 1);
+    let total_n = parse_int_or(total, 0);
+    let per_page_n = parse_int_or(per_page, 20);
+    let shown_so_far = (page_n - 1) * per_page_n + pkg_objects.length();
+    print("Page " + page_n + ", showing " + pkg_objects.length() + " of " + total_n + " result(s).");
+    if (shown_so_far < total_n) {
+        print("Use --page " + (page_n + 1) + " to see more.");
+    }
+}
+
+// Delete a package, or a single version of a package, from the registry
+func command_unpublish(args) {
+    let pkg_name = null;
+    let version = null;
+    let registry_url = null;
+    let token = null;
+    let assume_yes = false;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--version" || arg == "-v") {
+            i++;
+            if (i >= args.length()) { throw "--version requires a value"; }
+            version = args[i];
+        } else if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { throw "--token requires a value"; }
+            token = args[i];
+        } else if (arg == "--yes" || arg == "-y") {
+            assume_yes = true;
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name != null) {
+                throw "Unexpected extra argument: " @ arg;
+            }
+            pkg_name = arg;
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    if (pkg_name == null || pkg_name == "") {
+        throw "Usage: npkg unpublish <name> [--version <v>] [--registry <url>] [--yes]";
+    }
+
+    if (token == null) {
+        token = load_credentials();
+    }
+    if (token == null || token == "") {
+        throw "No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.";
+    }
+
+    registry_url = resolve_registry_url(registry_url, null);
+
+    // Confirmation: by default prompt the user; --yes skips
+    let target_desc;
+    if (version == null) {
+        target_desc = "package '" + pkg_name + "' (ALL versions)";
+    } else {
+        target_desc = "version " + version + " of '" + pkg_name + "'";
+    }
+
+    if (!assume_yes) {
+        print("About to permanently delete " + target_desc + " from " + registry_url + ".");
+        print("This cannot be undone.");
+        print("Continue? [y/N]");
+        // io.stdin.readLine returns null on EOF (e.g. piped or non-TTY input).
+        // Treat that as a refusal rather than a silent yes.
+        let answer = io.stdin.readLine();
+        if (answer == null) {
+            throw "Aborted: no response from stdin (use --yes to bypass the prompt).";
+        }
+        let trimmed = answer.trim().toLower();
+        if (trimmed != "y" && trimmed != "yes") {
+            print("Aborted.");
+            return;
+        }
+    }
+
+    let path = "/api/packages/" + url_encode_component(pkg_name);
+    if (version != null) {
+        path = path + "/versions/" + url_encode_component(version);
+    }
+    let url = registry_url + path;
+
+    let resp = null;
+    try {
+        resp = await http.get({
+            url: url,
+            method: "DELETE",
+            headers: {
+                "Authorization": "Bearer " + token,
+                "Accept": "application/json"
+            }
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " + registry_url + ": " + err;
+    }
+
+    if (resp == null) {
+        throw "Failed to connect to registry at " + registry_url;
+    }
+
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        print("Deleted " + target_desc + ".");
+        return;
+    }
+
+    // Try to surface the server-provided error message
+    let body = resp.body;
+    let server_msg = null;
+    if (body != null && body != "") {
+        server_msg = extract_json_string(body, "error");
+    }
+
+    if (server_msg == null || server_msg == "") {
+        if (resp.status_code == 401) {
+            server_msg = "unauthorized (token missing or invalid)";
+        } else if (resp.status_code == 403) {
+            server_msg = "forbidden (you do not own this package)";
+        } else if (resp.status_code == 404) {
+            server_msg = "not found";
+        } else if (resp.status_code == 409) {
+            server_msg = "conflict (package has dependents)";
+        } else {
+            server_msg = "registry returned status " + resp.status_code;
+        }
+    }
+
+    throw "Unpublish failed: " + server_msg;
+}
+
+func parse_int_or(s, fallback) {
+    if (s == null) { return fallback; }
+    if (typeof(s) == "number") { return s; }
+    let str = "" + s;
+    if (str == "") { return fallback; }
+    let n = 0;
+    let i = 0;
+    let neg = false;
+    if (str.char_code_at(0) == 45) {  // '-'
+        neg = true;
+        i = 1;
+    }
+    if (i >= str.length()) { return fallback; }
+    while (i < str.length()) {
+        let c = str.char_code_at(i);
+        if (c < 48 || c > 57) { return fallback; }
+        n = n * 10 + (c - 48);
+        i++;
+    }
+    if (neg) { return -n; }
+    return n;
+}
+
+func main() {
+    let args = cli_args();
+    if (args.length() == 0) {
+        print_usage();
+        return;
+    }
+
+    let command = args[0];
+
+    if (command == "init") {
+        command_init(args);
+        return;
+    }
+
+    if (command == "install") {
+        command_install(args);
+        return;
+    }
+
+    if (command == "add") {
+        command_add(args);
+        return;
+    }
+
+    if (command == "clean") {
+        command_clean(args);
+        return;
+    }
+
+    if (command == "list") {
+        command_list(args);
+        return;
+    }
+
+    if (command == "update") {
+        command_update(args);
+        return;
+    }
+
+    if (command == "publish") {
+        command_publish(args);
+        return;
+    }
+
+    if (command == "login") {
+        command_login(args);
+        return;
+    }
+
+    if (command == "search") {
+        command_search(args);
+        return;
+    }
+
+    if (command == "unpublish") {
+        command_unpublish(args);
+        return;
+    }
+
+    if (command == "owner") {
+        command_owner(args);
+        return;
+    }
+
+    print("Unknown command: " @ command);
+    print_usage();
+    process.exit(1);
+}
+
+// `npkg owner` is a command group: ls (public), add / rm (auth required,
+// any current owner can call). Last-owner removal is refused by the server.
+func command_owner(args) {
+    if (args.length() < 2) {
+        throw "Usage: npkg owner <ls|add|rm> ...";
+    }
+    let sub = args[1];
+    if (sub == "ls" || sub == "list") {
+        command_owner_ls(args);
+        return;
+    }
+    if (sub == "add") {
+        command_owner_add(args);
+        return;
+    }
+    if (sub == "rm" || sub == "remove") {
+        command_owner_rm(args);
+        return;
+    }
+    throw "Unknown owner subcommand: " + sub + " (expected: ls, add, rm)";
+}
+
+// Reject usernames that would break naive JSON / URL embedding
+func valid_owner_username(name) {
+    if (name == null || name == "") { return false; }
+    if (name.length() > 64) { return false; }
+    let i = 0;
+    while (i < name.length()) {
+        let c = name.char_code_at(i);
+        let ok = (c >= 48 && c <= 57)        // 0-9
+              || (c >= 65 && c <= 90)        // A-Z
+              || (c >= 97 && c <= 122)       // a-z
+              || c == 45 || c == 46 || c == 95;  // - . _
+        if (!ok) { return false; }
+        i++;
+    }
+    return true;
+}
+
+// shared arg parser for `owner add` / `owner rm`. args[0]="owner", args[1]=sub.
+// returns an object like: {pkg, user, registry, token}.
+func parse_owner_mutate_args(args, verb) {
+    let pkg_name = null;
+    let target_user = null;
+    let registry_url = null;
+    let token = null;
+
+    let i = 2;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { throw "--token requires a value"; }
+            token = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name == null) {
+                pkg_name = arg;
+            } else if (target_user == null) {
+                target_user = arg;
+            } else {
+                throw "Unexpected extra argument: " @ arg;
+            }
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    if (pkg_name == null || target_user == null) {
+        throw "Usage: npkg owner " @ verb @ " <name> <user> [--registry <url>] [--token <key>]";
+    }
+    if (!valid_owner_username(target_user)) {
+        throw "Invalid username '" @ target_user @ "' (allowed: A-Z a-z 0-9 . _ -, max 64).";
+    }
+
+    if (token == null) {
+        token = load_credentials();
+    }
+    if (token == null || token == "") {
+        throw "No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.";
+    }
+
+    return {
+        pkg: pkg_name,
+        user: target_user,
+        registry: resolve_registry_url(registry_url, null),
+        token: token
+    };
+}
+
+// surface the server-provided JSON {"error":"..."} verbatim when present
+func owner_failure_message(resp, verb) {
+    let body = resp.body;
+    let server_msg = null;
+    if (body != null && body != "") {
+        server_msg = extract_json_string(body, "error");
+    }
+    if (server_msg != null && server_msg != "") {
+        return server_msg;
+    }
+    let sc = resp.status_code;
+    if (sc == 401) { return "unauthorized (token missing or invalid)"; }
+    if (sc == 403) { return "forbidden (you do not own this package)"; }
+    if (sc == 404) { return "not found"; }
+    if (sc == 409) { return "conflict"; }
+    return "registry returned status " @ sc;
+}
+
+func command_owner_add(args) {
+    let parsed = parse_owner_mutate_args(args, "add");
+    let url = parsed.registry + "/api/packages/" + url_encode_component(parsed.pkg) + "/owners";
+    let body = "{\"username\":\"" + parsed.user + "\"}";
+
+    let resp = null;
+    try {
+        resp = await http.get({
+            url: url,
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " + parsed.token,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: body
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + parsed.registry;
+    }
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        let ok_msg = extract_json_string(resp.body, "ok");
+        if (ok_msg != null && ok_msg != "") {
+            print(ok_msg);
+        } else {
+            print("Added " + parsed.user + " as owner of " + parsed.pkg + ".");
+        }
+        return;
+    }
+    throw "owner add failed: " + owner_failure_message(resp, "add");
+}
+
+func command_owner_rm(args) {
+    let parsed = parse_owner_mutate_args(args, "rm");
+    let url = parsed.registry + "/api/packages/"
+              + url_encode_component(parsed.pkg)
+              + "/owners/"
+              + url_encode_component(parsed.user);
+
+    let resp = null;
+    try {
+        resp = await http.get({
+            url: url,
+            method: "DELETE",
+            headers: {
+                "Authorization": "Bearer " + parsed.token,
+                "Accept": "application/json"
+            }
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + parsed.registry;
+    }
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        let ok_msg = extract_json_string(resp.body, "ok");
+        if (ok_msg != null && ok_msg != "") {
+            print(ok_msg);
+        } else {
+            print("Removed " + parsed.user + " from owners of " + parsed.pkg + ".");
+        }
+        return;
+    }
+    throw "owner rm failed: " + owner_failure_message(resp, "rm");
+}
+
+func command_owner_ls(args) {
+    let pkg_name = null;
+    let registry_url = null;
+
+    // args[0] = "owner", args[1] = "ls", remaining are flags / positional.
+    let i = 2;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name != null) {
+                throw "Unexpected extra argument: " @ arg;
+            }
+            pkg_name = arg;
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    if (pkg_name == null || pkg_name == "") {
+        throw "Usage: npkg owner ls <name> [--registry <url>]";
+    }
+
+    registry_url = resolve_registry_url(registry_url, null);
+
+    let url = registry_url @ "/api/packages/" @ url_encode_component(pkg_name) @ "/owners";
+
+    let resp = null;
+    try {
+        resp = await http.get(url);
+    } catch (err) {
+        throw "Failed to reach registry at " + registry_url + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + registry_url;
+    }
+
+    if (resp.status_code < 200 || resp.status_code >= 300) {
+        let body = resp.body;
+        let server_msg = null;
+        if (body != null && body != "") {
+            server_msg = extract_json_string(body, "error");
+        }
+        if (server_msg == null || server_msg == "") {
+            if (resp.status_code == 404) {
+                server_msg = "package not found";
+            } else {
+                server_msg = "registry returned status " + resp.status_code;
+            }
+        }
+        throw "owner ls failed: " + server_msg;
+    }
+
+    let body = resp.body;
+    let owners_text = extract_json_array(body, "owners");
+    if (owners_text == null) {
+        // No "owners" key at all - defensive: server should always return it.
+        print("No owners found for '" + pkg_name + "'.");
+        return;
+    }
+
+    let owner_objects = split_json_objects(owners_text);
+    if (owner_objects.length() == 0) {
+        // Backfill should guarantee >=1, but handle the empty-array case.
+        print("No owners found for '" + pkg_name + "'.");
+        return;
+    }
+
+    print("Owners of " + pkg_name + ":");
+    for (obj in owner_objects) {
+        let username = extract_json_string(obj, "username");
+        let added_at = extract_json_string(obj, "addedAt");
+        if (username == null) { continue; }
+        if (added_at == null || added_at == "") {
+            print("  " + username);
+        } else {
+            print("  " + username + "  (since " + added_at + ")");
+        }
+    }
+}
+
+try {
+    main();
+} catch (err) {
+    print("npkg error: " + err);
+    process.exit(1);
+}

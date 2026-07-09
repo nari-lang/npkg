@@ -1,0 +1,311 @@
+import Semver from "./semver.nari";
+
+func read_registry_text(url) {
+    let response = await http.get(url);
+    if (response == null) {
+        throw "Registry request failed for " @ url;
+    }
+    if (response.status_code < 200 || response.status_code >= 300) {
+        throw "Registry request failed for " @ url @ " with HTTP status " @ response.status_code;
+    }
+    return response.body;
+}
+
+func is_quote_char(text, index) {
+    return index >= 0 && index < text.length() && text.char_code_at(index) == 34;
+}
+
+func is_backslash_char(text, index) {
+    return index >= 0 && index < text.length() && text.char_code_at(index) == 92;
+}
+
+func unquote(text) {
+    let trimmed = text.trim();
+    if (trimmed.length() >= 2 && is_quote_char(trimmed, 0) && is_quote_char(trimmed, trimmed.length() - 1)) {
+        return trimmed.substr(1, trimmed.length() - 2);
+    }
+    return trimmed;
+}
+
+func strip_comment(line) {
+    let in_string = false;
+    let i = 0;
+    while (i < line.length()) {
+        let ch = line.char_code_at(i);
+        if (ch == 34) {
+            let escaped = i > 0 && is_backslash_char(line, i - 1);
+            if (!escaped) {
+                in_string = !in_string;
+            }
+        }
+        if (ch == 35 && !in_string) {
+            return line.substr(0, i);
+        }
+        i++;
+    }
+    return line;
+}
+
+func find_unquoted_char(text, needle) {
+    let in_string = false;
+    let depth_brace = 0;
+    let depth_bracket = 0;
+    let i = 0;
+    while (i < text.length()) {
+        let ch = text.char_code_at(i);
+        if (ch == 34) {
+            let escaped = i > 0 && is_backslash_char(text, i - 1);
+            if (!escaped) {
+                in_string = !in_string;
+            }
+        } else if (!in_string) {
+            if (ch == 123) {
+                depth_brace++;
+            } else if (ch == 125) {
+                depth_brace--;
+            } else if (ch == 91) {
+                depth_bracket++;
+            } else if (ch == 93) {
+                depth_bracket--;
+            } else if (text.char_at(i) == needle && depth_brace == 0 && depth_bracket == 0) {
+                return i;
+            }
+        }
+        i++;
+    }
+    return -1;
+}
+
+func split_top_level(text, separator) {
+    let items = [];
+    let in_string = false;
+    let depth_brace = 0;
+    let depth_bracket = 0;
+    let start = 0;
+    let i = 0;
+
+    while (i < text.length()) {
+        let ch = text.char_code_at(i);
+        if (ch == 34) {
+            let escaped = i > 0 && is_backslash_char(text, i - 1);
+            if (!escaped) {
+                in_string = !in_string;
+            }
+        } else if (!in_string) {
+            if (ch == 123) {
+                depth_brace++;
+            } else if (ch == 125) {
+                depth_brace--;
+            } else if (ch == 91) {
+                depth_bracket++;
+            } else if (ch == 93) {
+                depth_bracket--;
+            } else if (text.char_at(i) == separator && depth_brace == 0 && depth_bracket == 0) {
+                items.push(text.substr(start, i - start).trim());
+                start = i + 1;
+            }
+        }
+        i++;
+    }
+
+    let tail = text.substr(start, text.length() - start).trim();
+    if (tail != "") {
+        items.push(tail);
+    }
+    return items;
+}
+
+func parse_scalar(raw) {
+    let trimmed = raw.trim();
+    if (trimmed == "") {
+        return "";
+    }
+    if (is_quote_char(trimmed, 0)) {
+        return unquote(trimmed);
+    }
+    if (trimmed.char_code_at(0) == 91) {
+        let inner = trimmed.substr(1, trimmed.length() - 2).trim();
+        if (inner == "") {
+            return [];
+        }
+        let values = [];
+        let parts = split_top_level(inner, ",");
+        for (part in parts) {
+            values.push(parse_scalar(part));
+        }
+        return values;
+    }
+    if (trimmed == "true") {
+        return true;
+    }
+    if (trimmed == "false") {
+        return false;
+    }
+    if (trimmed.index_of(".") != -1) {
+        return parse_float(trimmed);
+    }
+    return parse_int(trimmed);
+}
+
+func parse_package_section(section_name) {
+    if (!section_name.starts_with("packages.")) {
+        return null;
+    }
+
+    let rest = section_name.substr(9, section_name.length());
+    let parts = [];
+    let i = 0;
+    while (i < rest.length()) {
+        if (rest.charAt(i) == ".") {
+            i++;
+            continue;
+        }
+        if (!is_quote_char(rest, i)) {
+            return null;
+        }
+        i++;
+        let start = i;
+        while (i < rest.length()) {
+            if (is_quote_char(rest, i) && !is_backslash_char(rest, i - 1)) {
+                break;
+            }
+            i++;
+        }
+        if (i >= rest.length()) {
+            return null;
+        }
+        parts.push(rest.substr(start, i - start));
+        i++;
+    }
+
+    if (parts.length() != 2) {
+        return null;
+    }
+
+    return {
+        packageName: parts[0],
+        version: parts[1],
+    };
+}
+
+func normalize_base_url(url) {
+    if (url.ends_with("/")) {
+        return url.substr(0, url.length() - 1);
+    }
+    return url;
+}
+
+export func load_registry(registry_url) {
+    let content = read_registry_text(registry_url);
+    let registry = {
+        registryUrl: registry_url,
+        packages: {},
+    };
+    let current_package = null;
+    let current_version = null;
+    let lines = content.split("\n");
+
+    for (line in lines) {
+        let cleaned = strip_comment(line).trim();
+        if (cleaned == "") {
+            continue;
+        }
+
+        if (cleaned.char_code_at(0) == 91 && cleaned.char_code_at(cleaned.length() - 1) == 93) {
+            let section_name = cleaned.substr(1, cleaned.length() - 2).trim();
+            let parsed = parse_package_section(section_name);
+            if (parsed == null) {
+                current_package = null;
+                current_version = null;
+                continue;
+            }
+            current_package = parsed.packageName;
+            current_version = parsed.version;
+            if (!registry.packages.has_key(current_package)) {
+                registry.packages[current_package] = {};
+            }
+            registry.packages[current_package][current_version] = {
+                packageName: current_package,
+                version: current_version,
+                registryUrl: registry_url,
+            };
+            continue;
+        }
+
+        let eq = find_unquoted_char(cleaned, "=");
+        if (eq == -1) {
+            throw "Invalid registry line: " @ cleaned;
+        }
+
+        let key = unquote(cleaned.substr(0, eq).trim());
+        let raw_value = cleaned.substr(eq + 1, cleaned.length() - eq - 1).trim();
+
+        if (current_package != null && current_version != null) {
+            registry.packages[current_package][current_version][key] = parse_scalar(raw_value);
+        } else {
+            registry[key] = parse_scalar(raw_value);
+        }
+    }
+
+    if (!registry.has_key("registryVersion")) {
+        throw "Registry " @ registry_url @ " is missing registryVersion";
+    }
+    if (registry.registryVersion != 1) {
+        throw "Unsupported registryVersion " @ registry.registryVersion @ " in " @ registry_url;
+    }
+
+    return registry;
+}
+
+func validate_entry(entry, package_name, version, registry_url) {
+    if (!entry.has_key("url") || entry["url"] == "") {
+        throw "Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing url";
+    }
+    if (!entry.has_key("integrity") || entry["integrity"] == "") {
+        throw "Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing integrity";
+    }
+    entry.archiveUrl = entry["url"];
+}
+
+export func find_package_version(registry_url, package_name, version) {
+    let registry = load_registry(registry_url);
+    if (!registry.packages.has_key(package_name)) {
+        return null;
+    }
+
+    let versions = registry.packages[package_name];
+    if (!versions.has_key(version)) {
+        return null;
+    }
+
+    let entry = versions[version];
+    validate_entry(entry, package_name, version, registry_url);
+    return entry;
+}
+
+export func find_satisfying_version(registry_url, package_name, requirement) {
+    let registry = load_registry(registry_url);
+    if (!registry.packages.has_key(package_name)) {
+        return null;
+    }
+
+    let versions = registry.packages[package_name];
+    let version_keys = versions.keys();
+
+    let best_version = null;
+    for (v in version_keys) {
+        if (Semver.satisfies(v, requirement)) {
+            if (best_version == null || Semver.compare(v, best_version) > 0) {
+                best_version = v;
+            }
+        }
+    }
+
+    if (best_version == null) {
+        return null;
+    }
+
+    let entry = versions[best_version];
+    validate_entry(entry, package_name, best_version, registry_url);
+    return entry;
+}

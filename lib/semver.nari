@@ -1,0 +1,65 @@
+func parse_int_at(text, start) {
+    let result = 0;
+    let i = start;
+    while (i < text.length()) {
+        let ch = text.char_code_at(i);
+        if (ch < 48 || ch > 57) {
+            break;
+        }
+        result = result * 10 + (ch - 48);
+        i++;
+    }
+    return result;
+}
+
+export func parse_semver(version_str) {
+    let t = version_str.trim();
+    let dot1 = t.index_of(".");
+    if (dot1 == -1) {
+        return { major: parse_int_at(t, 0), minor: 0, patch: 0 };
+    }
+    let major = parse_int_at(t, 0);
+    let rest = t.substr(dot1 + 1, t.length());
+    let dot2 = rest.index_of(".");
+    if (dot2 == -1) {
+        return { major: major, minor: parse_int_at(rest, 0), patch: 0 };
+    }
+    let minor = parse_int_at(rest, 0);
+    let patch = parse_int_at(rest.substr(dot2 + 1, rest.length()), 0);
+    return { major: major, minor: minor, patch: patch };
+}
+
+export func compare(a_str, b_str) {
+    let a = parse_semver(a_str);
+    let b = parse_semver(b_str);
+    if (a.major != b.major) { return a.major - b.major; }
+    if (a.minor != b.minor) { return a.minor - b.minor; }
+    return a.patch - b.patch;
+}
+
+export func satisfies(version_str, requirement) {
+    let req = requirement.trim();
+
+    // "*" or empty = any version
+    if (req == "*" || req == "") {
+        return true;
+    }
+
+    if (req.starts_with("^")) {
+        let req_ver = parse_semver(req.substr(1, req.length()));
+        let ver = parse_semver(version_str);
+        if (ver.major != req_ver.major) { return false; }
+        if (ver.minor != req_ver.minor) { return ver.minor > req_ver.minor; }
+        return ver.patch >= req_ver.patch;
+    }
+
+    if (req.starts_with("~")) {
+        let req_ver = parse_semver(req.substr(1, req.length()));
+        let ver = parse_semver(version_str);
+        if (ver.major != req_ver.major) { return false; }
+        if (ver.minor != req_ver.minor) { return false; }
+        return ver.patch >= req_ver.patch;
+    }
+
+    return version_str == req;
+}

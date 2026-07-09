@@ -1,0 +1,102 @@
+func quote_string(value) {
+    return "\"" + value.replace_all("\"", "\\\"") + "\"";
+}
+
+func format_integrity(pkg) {
+    if (pkg["source"] == "registry") {
+        return pkg["packageIntegrity"];
+    }
+    return "fnv1a-" + pkg["packageIntegrity"];
+}
+
+// v1 lockfile: single root package + flat packages table.
+// Kept for single-package projects so existing fixtures and consumers don't shift.
+func render_v1(root_manifest, resolved_packages) {
+    let lines = [];
+    lines.push("lockfileVersion = 1");
+    lines.push("root = " @ quote_string(root_manifest["name"] @ "@" @ root_manifest["version"]));
+    lines.push("");
+    append_packages(lines, resolved_packages);
+    return lines.join("\n");
+}
+
+// v2 lockfile: workspace-aware
+// The header records the workspace root directory + each member's name@version
+func render_v2(workspace, resolved_packages, members) {
+    let lines = [];
+    lines.push("lockfileVersion = 2");
+    let root_manifest = workspace["rootManifest"];
+    if (root_manifest.has_key("name") && root_manifest["name"] != null && root_manifest["name"] != "") {
+        lines.push("workspaceRoot = " @ quote_string(root_manifest["name"] @ "@" @ root_manifest["version"]));
+    } else {
+        // Virtual root records the directory so we can still detect moves
+        lines.push("workspaceRoot = " @ quote_string("virtual:" @ workspace["rootDir"]));
+    }
+    lines.push("");
+
+    if (members != null && members.length() > 0) {
+        lines.push("[workspace]");
+        let names = [];
+        for (m in members) { names.push(m["name"]); }
+        names.sort();
+        // deduplicated members list
+        let member_pairs = [];
+        for (name in names) {
+            for (m in members) {
+                if (m["name"] == name) {
+                    member_pairs.push(name @ "@" @ m["version"]);
+                    break;
+                }
+            }
+        }
+        let joined = "";
+        let i = 0;
+        while (i < member_pairs.length()) {
+            if (i > 0) { joined = joined @ ", "; }
+            joined = joined @ quote_string(member_pairs[i]);
+            i++;
+        }
+        lines.push("members = [" @ joined @ "]");
+        lines.push("");
+    }
+
+    append_packages(lines, resolved_packages);
+    return lines.join("\n");
+}
+
+func append_packages(lines, resolved_packages) {
+    let package_names = resolved_packages.keys();
+    package_names.sort();
+
+    for (package_name in package_names) {
+        let pkg = resolved_packages[package_name];
+        lines.push("[packages." @ quote_string(package_name) @ "]");
+        lines.push("version = " @ quote_string(pkg["version"]));
+        lines.push("integrity = " @ quote_string(format_integrity(pkg)));
+        lines.push("source = " @ quote_string(pkg["source"]));
+        lines.push("storePath = " @ quote_string(pkg["storePath"]));
+        if (pkg["source"] == "registry" && pkg.has_key("registry")) {
+            lines.push("registry = " @ quote_string(pkg["registry"]));
+        }
+
+        let dep_names = pkg["dependencies"].keys();
+        dep_names.sort();
+        if (dep_names.length() > 0) {
+            lines.push("");
+            lines.push("[packages." @ quote_string(package_name) @ ".dependencies]");
+            for (dep_name in dep_names) {
+                lines.push(quote_string(dep_name) @ " = " @ quote_string(pkg["dependencies"][dep_name]));
+            }
+        }
+
+        lines.push("");
+    }
+}
+
+// dispatches between v1 (single package) and v2 (workspace) based on `resolution["workspace"]`
+export func render_lockfile(root_manifest, resolved_packages, workspace, members) {
+    if (workspace != null) {
+        return render_v2(workspace, resolved_packages, members);
+    }
+    return render_v1(root_manifest, resolved_packages);
+}

@@ -1,0 +1,213 @@
+func is_quote_char(text, index) {
+    return index >= 0 && index < text.length() && text.char_code_at(index) == 34;
+}
+
+func is_backslash_char(text, index) {
+    return index >= 0 && index < text.length() && text.char_code_at(index) == 92;
+}
+
+func unquote(text) {
+    let t = text.trim();
+    if (t.length() >= 2 && is_quote_char(t, 0) && is_quote_char(t, t.length() - 1)) {
+        return t.substr(1, t.length() - 2);
+    }
+    return t;
+}
+
+func strip_comment(line) {
+    let in_string = false;
+    let i = 0;
+    while (i < line.length()) {
+        let ch = line.char_code_at(i);
+        if (ch == 34) {
+            if (!(i > 0 && is_backslash_char(line, i - 1))) {
+                in_string = !in_string;
+            }
+        }
+        if (ch == 35 && !in_string) {
+            return line.substr(0, i);
+        }
+        i++;
+    }
+    return line;
+}
+
+func find_eq(text) {
+    let in_string = false;
+    let i = 0;
+    while (i < text.length()) {
+        let ch = text.char_code_at(i);
+        if (ch == 34) {
+            if (!(i > 0 && is_backslash_char(text, i - 1))) {
+                in_string = !in_string;
+            }
+        }
+        if (ch == 61 && !in_string) {
+            return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+func parse_section_header(section_content) {
+    let st = section_content.trim();
+
+    if (!st.starts_with("packages.")) {
+        return { sectionType: "other" };
+    }
+
+    let rest = st.substr(9, st.length()).trim();
+    if (rest.length() < 2 || rest.char_code_at(0) != 34) {
+        return { sectionType: "other" };
+    }
+
+    let i = 1;
+    let pkg_name = "";
+    while (i < rest.length()) {
+        let ch = rest.char_code_at(i);
+        if (ch == 34) {
+            break;
+        }
+        if (ch == 92 && i + 1 < rest.length()) {
+            i++;
+            pkg_name = pkg_name @ rest.charAt(i);
+            i++;
+            continue;
+        }
+        pkg_name = pkg_name @ rest.charAt(i);
+        i++;
+    }
+
+    if (i >= rest.length()) {
+        return { sectionType: "other" };
+    }
+
+    let after = rest.substr(i + 1, rest.length()).trim();
+
+    if (after == "") {
+        return { sectionType: "package", packageName: pkg_name };
+    }
+    if (after == ".dependencies") {
+        return { sectionType: "package_deps", packageName: pkg_name };
+    }
+    return { sectionType: "other" };
+}
+
+// Parse a TOML array literal like ["a", "b", "c"],
+// does not support nested arrays because lockfile workspaces are flat string lists.
+func parse_string_array(raw) {
+    let t = raw.trim();
+    if (t.length() < 2 || t.char_code_at(0) != 91 || t.char_code_at(t.length() - 1) != 93) {
+        return [];
+    }
+    let inner = t.substr(1, t.length() - 2).trim();
+    if (inner == "") { return []; }
+
+    let items = [];
+    let i = 0;
+    while (i < inner.length()) {
+        // skip whitespace + commas between items
+        while (i < inner.length()) {
+            let ch = inner.char_code_at(i);
+            if (ch == 32 || ch == 9 || ch == 44) { i++; continue; }
+            break;
+        }
+        if (i >= inner.length()) { break; }
+        if (inner.char_code_at(i) != 34) {
+            // Non-string entry, abort to avoid silently mangling values
+            return [];
+        }
+        i++;
+        let value = "";
+        while (i < inner.length()) {
+            let ch = inner.char_code_at(i);
+            if (ch == 92 && i + 1 < inner.length()) {
+                i++;
+                value = value @ inner.charAt(i);
+                i++;
+                continue;
+            }
+            if (ch == 34) { break; }
+            value = value @ inner.charAt(i);
+            i++;
+        }
+        items.push(value);
+        if (i < inner.length() && inner.char_code_at(i) == 34) { i++; }
+    }
+    return items;
+}
+
+func parse_value(raw) {
+    let t = raw.trim();
+    if (t == "") { return ""; }
+    if (is_quote_char(t, 0)) { return unquote(t); }
+    if (t.char_code_at(0) == 91) { return parse_string_array(t); }
+    if (t == "true") { return true; }
+    if (t == "false") { return false; }
+    if (t.index_of(".") != -1) { return parseFloat(t); }
+    return parseInt(t);
+}
+
+export func parse_lockfile(content) {
+    let lockfile = {
+        lockfileVersion: 0,
+        root: "",
+        packages: {},
+        workspace: null,
+    };
+
+    let current_section_type = "top";
+    let current_package_name = null;
+
+    let lines = content.split("\n");
+    for (line in lines) {
+        let cleaned = strip_comment(line).trim();
+        if (cleaned == "") { continue; }
+
+        if (cleaned.char_code_at(0) == 91 && cleaned.char_code_at(cleaned.length() - 1) == 93) {
+            let section_content = cleaned.substr(1, cleaned.length() - 2).trim();
+
+            // v2 [workspace] section is flat: just `members = [...]`.
+            if (section_content == "workspace") {
+                current_section_type = "workspace";
+                current_package_name = null;
+                if (lockfile["workspace"] == null) {
+                    lockfile["workspace"] = { members: [] };
+                }
+                continue;
+            }
+
+            let parsed = parse_section_header(section_content);
+            current_section_type = parsed["sectionType"];
+            if (current_section_type == "package" || current_section_type == "package_deps") {
+                current_package_name = parsed["packageName"];
+                if (!lockfile.packages.has_key(current_package_name)) {
+                    lockfile.packages[current_package_name] = { dependencies: {} };
+                }
+            }
+            continue;
+        }
+
+        let eq = find_eq(cleaned);
+        if (eq == -1) { continue; }
+
+        let key = unquote(cleaned.substr(0, eq).trim());
+        let val = parse_value(cleaned.substr(eq + 1, cleaned.length() - eq - 1).trim());
+
+        if (current_section_type == "top") {
+            lockfile[key] = val;
+        } else if (current_section_type == "workspace") {
+            if (lockfile["workspace"] == null) {
+                lockfile["workspace"] = { members: [] };
+            }
+            lockfile["workspace"][key] = val;
+        } else if (current_section_type == "package" && current_package_name != null) {
+            lockfile.packages[current_package_name][key] = val;
+        } else if (current_section_type == "package_deps" && current_package_name != null) {
+            lockfile.packages[current_package_name].dependencies[key] = val;
+        }
+    }
+
+    return lockfile;
+}
