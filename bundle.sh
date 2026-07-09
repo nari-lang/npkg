@@ -1,7 +1,7 @@
 #!/bin/sh
 # Bundle the npkg CLI into a release tarball.
 #   ./bundle.sh [version]
-set -euo pipefail
+set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$here"
