@@ -418,7 +418,7 @@ export func remote_version_exists(registry_url, pkg_name, version) {
     let url = registry_url @ "/api/packages/" @ encoded @ "/versions/" @ version;
     let resp = null;
     try {
-        resp = await http.get(url);
+        resp = await http.fetch(url);
     } catch (e) {
         return false;
     }
@@ -528,8 +528,7 @@ export func upload_archive(registry_url, encoded_pkg_name, version, token, archi
     let url = registry_url @ "/api/packages/" @ encoded_pkg_name @ "/versions";
     let resp = null;
     try {
-        resp = await http.get({
-            url: url,
+        resp = await http.fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " @ token,
@@ -563,7 +562,7 @@ export func ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, toke
     let check_url = registry_url + "/api/packages/" + encoded_pkg_name;
     let check_resp = null;
     try {
-        check_resp = await http.get(check_url);
+        check_resp = await http.fetch(check_url);
     } catch (e) {
         // treat transport failures as "unknown"
         return;
@@ -576,8 +575,7 @@ export func ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, toke
     let body = "{\"name\":\"" @ pkg_name @ "\",\"description\":\"\"}";
     let create_resp = null;
     try {
-        create_resp = await http.get({
-            url: registry_url + "/api/packages",
+        create_resp = await http.fetch(registry_url + "/api/packages", {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " @ token,

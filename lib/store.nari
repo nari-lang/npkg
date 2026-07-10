@@ -28,7 +28,7 @@ func list_dir(path) {
 }
 
 func fetch_binary(url) {
-    let response = await http.get(url);
+    let response = await http.fetch(url);
     if (response == null) {
         throw "Failed to download " @ url;
     }

@@ -1,7 +1,7 @@
 import Semver from "./semver.nari";
 
 func read_registry_text(url) {
-    let response = await http.get(url);
+    let response = await http.fetch(url);
     if (response == null) {
         throw "Registry request failed for " @ url;
     }

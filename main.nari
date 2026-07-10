@@ -641,8 +641,7 @@ func command_login(args) {
     let session_resp = null;
     try {
         print(registry_url);
-        session_resp = await http.get({
-            url: registry_url + "/api/auth/cli-session",
+        session_resp = await http.fetch(registry_url + "/api/auth/cli-session", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -689,7 +688,7 @@ func command_login(args) {
         system.exec("sleep 2");
         polls++;
 
-        let resp = await http.get(poll_url);
+        let resp = await http.fetch(poll_url);
         if (resp == null) { continue; }
         if (resp.status_code == 410) {
             throw "Login session expired. Run `npkg login` again.";
@@ -1230,7 +1229,7 @@ func command_search(args) {
     let encoded_query = url_encode_component(query);
     let url = registry_url + "/api/packages?q=" + encoded_query + "&page=" + page + "&per_page=" + per_page;
 
-    let resp = await http.get(url);
+    let resp = await http.fetch(url);
     if (resp == null) {
         throw "Failed to connect to registry at " + registry_url;
     }
@@ -1373,8 +1372,7 @@ func command_unpublish(args) {
 
     let resp = null;
     try {
-        resp = await http.get({
-            url: url,
+        resp = await http.fetch(url, {
             method: "DELETE",
             headers: {
                 "Authorization": "Bearer " + token,
@@ -1629,8 +1627,7 @@ func command_owner_add(args) {
 
     let resp = null;
     try {
-        resp = await http.get({
-            url: url,
+        resp = await http.fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " + parsed.token,
@@ -1666,8 +1663,7 @@ func command_owner_rm(args) {
 
     let resp = null;
     try {
-        resp = await http.get({
-            url: url,
+        resp = await http.fetch(url, {
             method: "DELETE",
             headers: {
                 "Authorization": "Bearer " + parsed.token,
@@ -1725,7 +1721,7 @@ func command_owner_ls(args) {
 
     let resp = null;
     try {
-        resp = await http.get(url);
+        resp = await http.fetch(url);
     } catch (err) {
         throw "Failed to reach registry at " + registry_url + ": " + err;
     }
