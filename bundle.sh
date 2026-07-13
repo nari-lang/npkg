@@ -15,8 +15,8 @@ STAGE="dist/${NAME}"
 rm -rf "$STAGE"
 mkdir -p "${STAGE}/bin" "${STAGE}/lib/npkg"
 
-cp main.nari "${STAGE}/lib/npkg/main.nari"
 cp -R lib "${STAGE}/lib/npkg/lib"
+cp -R src "${STAGE}/lib/npkg/src"
 cp LICENSE "${STAGE}/LICENSE" 2>/dev/null || true
 cp README.md "${STAGE}/README.md" 2>/dev/null || true
 
@@ -33,9 +33,9 @@ done
 bindir=$(cd "$(dirname "$self")" && pwd)
 root=$(dirname "$bindir")
 if [ -x "$bindir/nari" ]; then
-    exec "$bindir/nari" "$root/lib/npkg/main.nari" "$@"
+    exec "$bindir/nari" "$root/lib/npkg/src/main.nari" "$@"
 fi
-exec nari "$root/lib/npkg/main.nari" "$@"
+exec nari "$root/lib/npkg/src/main.nari" "$@"
 WRAPPER
 chmod +x "${STAGE}/bin/npkg"
 

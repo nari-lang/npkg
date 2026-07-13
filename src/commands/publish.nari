@@ -1,0 +1,98 @@
+import Path from "../../lib/path_utils.nari";
+import Storage from "../../lib/storage.nari";
+import Registry from "../../lib/registry.nari";
+import Manifest from "../../lib/manifest.nari";
+import Workspace from "../../lib/workspace.nari";
+import Publish from "../../lib/publish.nari";
+import Utils from "../../lib/utils.nari";
+
+export func command_publish(args) {
+    // publish [project_dir] [--registry <url>] [--token <key>] [--workspace] [--dry-run]
+    let project_dir = ".";
+    let registry_url = null;
+    let token = null;
+    let workspace_mode = false;
+    let dry_run = false;
+    let allow_dirty = false;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { throw "--token requires a value"; }
+            token = args[i];
+        } else if (arg == "--workspace" || arg == "--all") {
+            workspace_mode = true;
+        } else if (arg == "--dry-run" || arg == "-n") {
+            dry_run = true;
+        } else if (arg == "--allow-dirty") {
+            allow_dirty = true;
+        } else if (!arg.starts_with("-")) {
+            project_dir = arg;
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    if (token == null) {
+        token = Storage.load_credentials();
+    }
+    if (!dry_run && (token == null || token == "")) {
+        throw "No API token provided. Use --token <key> or set the NPKG_TOKEN environment variable.";
+    }
+
+    if (workspace_mode) {
+        let workspace = Workspace.discover_from(project_dir);
+        if (workspace == null) {
+            throw "--workspace requires a [workspace] table; no workspace found from " + project_dir;
+        }
+
+        let members = workspace["members"];
+        if (members.length() == 0) {
+            throw "Workspace has no members to publish";
+        }
+
+        let order = Utils.topo_sort_workspace_members(members);
+
+        let version_overrides = {};
+        for (m in members) {
+            version_overrides[m["name"]] = m["version"];
+        }
+
+        let registry_anchor_manifest = workspace["rootManifest"];
+        if (!Manifest.has_package(registry_anchor_manifest) && !registry_anchor_manifest.has_key("registries")) {
+            registry_anchor_manifest = members[0];
+        }
+        let resolved_registry = Registry.resolve_registry_url(registry_url, registry_anchor_manifest);
+
+        print("Publishing workspace (" + order.length() + " members) to " + resolved_registry);
+        let idx = 0;
+        while (idx < order.length()) {
+            let m = order[idx];
+            print("");
+            print("[" + (idx + 1) + "/" + order.length() + "] " + m["name"]);
+            Publish.publish_one_manifest(m, m["rootDir"], resolved_registry, token, version_overrides, dry_run, allow_dirty);
+            idx++;
+        }
+        print("");
+        if (dry_run) {
+            print("Dry run complete: " + order.length() + " member(s) staged.");
+        } else {
+            print("Workspace publish complete: " + order.length() + " member(s).");
+        }
+        return;
+    }
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, false);
+    let resolved_registry = Registry.resolve_registry_url(registry_url, manifest);
+    Publish.publish_one_manifest(manifest, project_dir, resolved_registry, token, {}, dry_run, allow_dirty);
+}

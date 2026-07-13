@@ -1,0 +1,256 @@
+import Storage from "../../lib/storage.nari";
+import URLUtils from "../../lib/url_utils.nari";
+import Registry from "../../lib/registry.nari";
+
+// `npkg owner` is a command group: ls (public), add / rm (auth required,
+// any current owner can call). Last-owner removal is refused by the server.
+
+// Reject usernames that would break naive JSON / URL embedding
+func valid_owner_username(name) {
+    if (name == null || name == "") { return false; }
+    if (name.length() > 64) { return false; }
+    let i = 0;
+    while (i < name.length()) {
+        let c = name.char_code_at(i);
+        let ok = (c >= 48 && c <= 57)        // 0-9
+              || (c >= 65 && c <= 90)        // A-Z
+              || (c >= 97 && c <= 122)       // a-z
+              || c == 45 || c == 46 || c == 95;  // - . _
+        if (!ok) { return false; }
+        i++;
+    }
+    return true;
+}
+
+// shared arg parser for `owner add` / `owner rm`. args[0]="owner", args[1]=sub.
+// returns an object like: {pkg, user, registry, token}.
+func parse_owner_mutate_args(args, verb) {
+    let pkg_name = null;
+    let target_user = null;
+    let registry_url = null;
+    let token = null;
+
+    let i = 2;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { throw "--token requires a value"; }
+            token = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name == null) {
+                pkg_name = arg;
+            } else if (target_user == null) {
+                target_user = arg;
+            } else {
+                throw "Unexpected extra argument: " @ arg;
+            }
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    if (pkg_name == null || target_user == null) {
+        throw "Usage: npkg owner " @ verb @ " <name> <user> [--registry <url>] [--token <key>]";
+    }
+    if (!valid_owner_username(target_user)) {
+        throw "Invalid username '" @ target_user @ "' (allowed: A-Z a-z 0-9 . _ -, max 64).";
+    }
+
+    if (token == null) {
+        token = Storage.load_credentials();
+    }
+    if (token == null || token == "") {
+        throw "No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.";
+    }
+
+    return {
+        pkg: pkg_name,
+        user: target_user,
+        registry: Registry.resolve_registry_url(registry_url, null),
+        token: token
+    };
+}
+
+// surface the server-provided JSON {"error":"..."} verbatim when present
+func owner_failure_message(resp, verb) {
+    let body = JSON.parse(resp.body);
+    let server_msg = body.error;
+    if (server_msg != null && server_msg != "") {
+        return server_msg;
+    }
+    let sc = resp.status_code;
+    if (sc == 401) { return "unauthorized (token missing or invalid)"; }
+    if (sc == 403) { return "forbidden (you do not own this package)"; }
+    if (sc == 404) { return "not found"; }
+    if (sc == 409) { return "conflict"; }
+    return "registry returned status " @ sc;
+}
+
+func command_owner_add(args) {
+    let parsed = parse_owner_mutate_args(args, "add");
+    let url = parsed.registry + "/api/packages/" + URLUtils.url_encode_component(parsed.pkg) + "/owners";
+    let body = "{\"username\":\"" + parsed.user + "\"}";
+
+    let resp = null;
+    try {
+        resp = await http.fetch(url, {
+            method: "POST",
+            headers: {
+                "Authorization": "Bearer " + parsed.token,
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: body
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + parsed.registry;
+    }
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        let ok_msg = JSON.parse(resp.body).ok;
+        if (ok_msg != null && ok_msg != "") {
+            print(ok_msg);
+        } else {
+            print("Added " + parsed.user + " as owner of " + parsed.pkg + ".");
+        }
+        return;
+    }
+    throw "owner add failed: " + owner_failure_message(resp, "add");
+}
+
+func command_owner_rm(args) {
+    let parsed = parse_owner_mutate_args(args, "rm");
+    let url = parsed.registry + "/api/packages/"
+              + URLUtils.url_encode_component(parsed.pkg)
+              + "/owners/"
+              + URLUtils.url_encode_component(parsed.user);
+
+    let resp = null;
+    try {
+        resp = await http.fetch(url, {
+            method: "DELETE",
+            headers: {
+                "Authorization": "Bearer " + parsed.token,
+                "Accept": "application/json"
+            }
+        });
+    } catch (err) {
+        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + parsed.registry;
+    }
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        let ok_msg = JSON.parse(resp.body).ok;
+        if (ok_msg != null && ok_msg != "") {
+            print(ok_msg);
+        } else {
+            print("Removed " + parsed.user + " from owners of " + parsed.pkg + ".");
+        }
+        return;
+    }
+    throw "owner rm failed: " + owner_failure_message(resp, "rm");
+}
+
+func command_owner_ls(args) {
+    let pkg_name = null;
+    let registry_url = null;
+
+    // args[0] = "owner", args[1] = "ls", remaining are flags / positional.
+    let i = 2;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name != null) {
+                throw "Unexpected extra argument: " @ arg;
+            }
+            pkg_name = arg;
+        } else {
+            throw "Unknown flag: " @ arg;
+        }
+        i++;
+    }
+
+    if (pkg_name == null || pkg_name == "") {
+        throw "Usage: npkg owner ls <name> [--registry <url>]";
+    }
+
+    registry_url = Registry.resolve_registry_url(registry_url, null);
+
+    let url = registry_url @ "/api/packages/" @ URLUtils.url_encode_component(pkg_name) @ "/owners";
+
+    let resp = null;
+    try {
+        resp = await http.fetch(url);
+    } catch (err) {
+        throw "Failed to reach registry at " + registry_url + ": " + err;
+    }
+    if (resp == null) {
+        throw "Failed to connect to registry at " + registry_url;
+    }
+
+    if (resp.status_code < 200 || resp.status_code >= 300) {
+        let body = JSON.parse(resp.body);
+        let server_msg = body.error;
+        if (server_msg == null || server_msg == "") {
+            if (resp.status_code == 404) {
+                server_msg = "package not found";
+            } else {
+                server_msg = "registry returned status " + resp.status_code;
+            }
+        }
+        throw "owner ls failed: " + server_msg;
+    }
+
+    let body = JSON.parse(resp.body);
+    let owners_objects = body.owners;
+    if (owners_objects == null) {
+        // No "owners" key at all - defensive: server should always return it.
+        print("No owners found for '" + pkg_name + "'.");
+        return;
+    }
+
+    print("Owners of " + pkg_name + ":");
+    for (obj in owners_objects) {
+        let username = obj.username;
+        let added_at = obj.addedAt;
+        if (username == null) { continue; }
+        if (added_at == null || added_at == "") {
+            print("  " + username);
+        } else {
+            print("  " + username + "  (since " + added_at + ")");
+        }
+    }
+}
+
+export func command_owner(args) {
+    if (args.length() < 2) {
+        throw "Usage: npkg owner <ls|add|rm> ...";
+    }
+    let sub = args[1];
+    if (sub == "ls" || sub == "list") {
+        command_owner_ls(args);
+        return;
+    }
+    if (sub == "add") {
+        command_owner_add(args);
+        return;
+    }
+    if (sub == "rm" || sub == "remove") {
+        command_owner_rm(args);
+        return;
+    }
+    throw "Unknown owner subcommand: " + sub + " (expected: ls, add, rm)";
+}

@@ -1,0 +1,108 @@
+import FileUtils from "../../lib/file_utils.nari";
+import Path from "../../lib/path_utils.nari";
+import ShellUtils from "../../lib/shell_utils.nari";
+import Storage from "../../lib/storage.nari";
+import Registry from "../../lib/registry.nari";
+
+export func command_login(args) {
+    let registry_url = null;
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else {
+            throw "Unknown argument: " @ arg;
+        }
+        i++;
+    }
+
+    registry_url = Registry.resolve_registry_url(registry_url, null);
+
+    let session_resp = null;
+    try {
+        print(registry_url);
+        session_resp = await http.fetch(registry_url + "/api/auth/cli-session", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            },
+            body: JSON.stringify({})
+        });
+    } catch (e) {
+        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
+    }
+    if (session_resp == null) {
+        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
+    }
+    let session_sc = session_resp.status_code;
+    if (session_sc < 200 || session_sc >= 300) {
+        let err_body = session_resp.body;
+        if (err_body == null) { err_body = ""; }
+        throw "Failed to create CLI session (HTTP " @ session_sc @ "): " @ err_body;
+    }
+    let session_text = session_resp.body;
+    if (session_text == null) { throw "Empty session response from registry."; }
+    let session_json = JSON.parse(session_text);
+    if (session_json == null) { throw "Invalid session response from registry: " @ session_text; }
+    
+    let session_id = session_json.sessionId;
+    let login_url  = session_json.loginUrl;
+    if (session_id == null || login_url == null) {
+        throw "Unexpected session response: " @ session_text;
+    }
+
+    print("");
+    print("Open this URL in your browser to authorize:");
+    print("  " @ login_url);
+    print("");
+    // Best-effort browser open
+    system.exec("xdg-open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || true");
+
+    // Poll until completed or timed out (max ~2 minutes, 2 s interval)
+    print("Waiting for browser authorization (Ctrl-C to cancel)...");
+    let poll_url = registry_url @ "/api/auth/cli-session/" @ session_id;
+    let max_polls = 60;
+    let polls = 0;
+    let api_key = null;
+
+    while (polls < max_polls) {
+        system.exec("sleep 2");
+        polls++;
+
+        let resp = await http.fetch(poll_url);
+        if (resp == null) { continue; }
+        if (resp.status_code == 410) {
+            throw "Login session expired. Run `npkg login` again.";
+        }
+        if (resp.status_code >= 200 && resp.status_code < 300) {
+            let body = JSON.parse(resp.body);
+            if (body.completed == true) {
+                api_key = body.apiKey;
+                break;
+            }
+        }
+    }
+
+    if (api_key == null) {
+        throw "Login timed out. Run `npkg login` again.";
+    }
+
+    // Save credentials to ~/.nari/npkg/credentials
+    let creds_dir = Storage.npkg_home_dir();
+    if (creds_dir == null) {
+        throw "HOME is not set; cannot save credentials.";
+    }
+    fs.mkdir_all(creds_dir);
+    Storage.secure_credentials_dir(creds_dir);
+
+    let creds_path = Path.join_path(creds_dir, "credentials");
+    FileUtils.write_text(creds_path, "NPKG_TOKEN=" @ api_key @ "\nNPKG_REGISTRY=" @ registry_url @ "\n");
+    Storage.secure_credentials_path(creds_path);
+
+    print("Logged in! Credentials saved to ~/.nari/npkg/credentials");
+    print("Key prefix: " @ api_key.substr(0, 13) @ "...");
+}

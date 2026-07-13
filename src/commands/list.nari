@@ -1,0 +1,97 @@
+import Path from "../../lib/path_utils.nari";
+import Manifest from "../../lib/manifest.nari";
+import LockfileReader from "../../lib/lockfile_reader.nari";
+import Workspace from "../../lib/workspace.nari";
+
+func print_pkg_tree(pkg_name, packages, visited, prefix, is_last) {
+    if (visited.has_key(pkg_name)) {
+        print(prefix @ (is_last ? "+-- " : "+-- ") @ pkg_name @ " (already shown)");
+        return;
+    }
+    visited[pkg_name] = true;
+
+    if (!packages.has_key(pkg_name)) {
+        print(prefix @ (is_last ? "+-- " : "+-- ") @ pkg_name @ " (missing from lockfile)");
+        return;
+    }
+
+    let pkg = packages[pkg_name];
+    let label = pkg_name + "@" + pkg["version"] + "  (" + pkg["source"] + ")";
+    print(prefix + (is_last ? "+-- " : "+-- ") + label);
+
+    let child_prefix = prefix @ (is_last ? "    " : "|   ");
+    let dep_names = pkg["dependencies"].keys();
+    dep_names.sort();
+    let n = dep_names.length();
+    let i = 0;
+    for (dep_name in dep_names) {
+        i++;
+        print_pkg_tree(dep_name, packages, visited, child_prefix, i == n);
+    }
+}
+
+func print_manifest_tree(manifest, packages) {
+    let header = manifest["name"] + "@" @ manifest["version"];
+    print(header);
+
+    let direct_names = manifest["dependencies"].keys();
+    direct_names.sort();
+
+    let visited = {};
+    let n = direct_names.length();
+    let i = 0;
+    for (dep_name in direct_names) {
+        i++;
+        print_pkg_tree(dep_name, packages, visited, "", i == n);
+    }
+}
+
+export func command_list(args) {
+    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
+
+    // search upward so `npkg list` works from any workspace member, not just the root.
+    let workspace = Workspace.discover_from(project_dir);
+    let lockfile_dir = project_dir;
+    if (workspace != null) {
+        lockfile_dir = workspace["rootDir"];
+    }
+    let lockfile_path = Path.join_path(lockfile_dir, "nari.lock.toml");
+
+    if (!await fs.fileExists(lockfile_path)) {
+        throw "No lockfile found at " + lockfile_path + ". Run `npkg install` first!";
+    }
+
+    let lockfile_text = await fs.readFile(lockfile_path);
+    if (lockfile_text == null) {
+        throw "Could not read lockfile at " + lockfile_path;
+    }
+
+    let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+    let packages = lockfile["packages"];
+
+    if (workspace != null) {
+        let root_manifest = workspace["rootManifest"];
+        if (workspace["isVirtual"]) {
+            print("workspace: " + workspace["rootDir"]);
+        } else {
+            print("workspace: " + root_manifest["name"] + "@" + root_manifest["version"]);
+        }
+        print("");
+
+        let members = workspace["members"];
+        let i = 0;
+        while (i < members.length()) {
+            let m = members[i];
+            print_manifest_tree(m, packages);
+            if (i < members.length() - 1) {
+                print("");
+            }
+            i++;
+        }
+        return;
+    }
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, false);
+    print_manifest_tree(manifest, packages);
+}

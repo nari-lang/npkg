@@ -1,0 +1,99 @@
+import URLUtils from "../../lib/url_utils.nari";
+import Registry from "../../lib/registry.nari";
+
+export func command_search(args) {
+    let query = "";
+    let registry_url = null;
+    let page = 1;
+    let per_page = 20;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { throw "--registry requires a value"; }
+            registry_url = args[i];
+        } else if (arg == "--page" || arg == "-p") {
+            i++;
+            if (i >= args.length()) { throw "--page requires a value"; }
+            page = args[i];
+        } else if (arg == "--per-page") {
+            i++;
+            if (i >= args.length()) { throw "--per-page requires a value"; }
+            per_page = args[i];
+        } else if (!arg.starts_with("-")) {
+            if (query == "") {
+                query = arg;
+            } else {
+                query = query @ " " @ arg;
+            }
+        } else {
+            throw "Unknown argument: " @ arg;
+        }
+        i++;
+    }
+
+    if (query == "") {
+        throw "Usage: npkg search <query> [--registry <url>] [--page <n>]";
+    }
+
+    registry_url = Registry.resolve_registry_url(registry_url, null);
+
+    let encoded_query = URLUtils.url_encode_component(query);
+    let url = registry_url + "/api/packages?q=" + encoded_query + "&page=" + page + "&per_page=" + per_page;
+
+    let resp = await http.fetch(url);
+    if (resp == null) {
+        throw "Failed to connect to registry at " + registry_url;
+    }
+    if (resp.status_code != 200) {
+        throw "Registry returned error " + resp.status_code;
+    }
+
+    let body = JSON.parse(resp.body);
+
+    let total_str = body.total;
+    let total = "0";
+    if (total_str != null) { total = total_str; }
+
+    let pkg_objects = body.packages;
+    if (pkg_objects == null || pkg_objects.length() == 0) {
+        print("No packages found matching '" + query + "'.");
+        return;
+    }
+
+    print("Found " + total + " result(s) for '" + query + "':");
+    print("");
+
+    for (pkg_obj in pkg_objects) {
+        let name = pkg_obj.name;
+        let description = pkg_obj.description;
+        let owner = pkg_obj.ownerName;
+        let downloads = pkg_obj.weeklyDownloads;
+
+        if (name == null) { continue; }
+        if (description == null) { description = ""; }
+        if (owner == null) { owner = ""; }
+        if (downloads == null) { downloads = "0"; }
+
+        print("  " + name + " (by " + owner + ")");
+        if (description != "") {
+            print("    " + description);
+        }
+        if (downloads != "0") {
+            print("    " + downloads + " downloads this week");
+        }
+    }
+
+    print("");
+    // only add pages if there are more pages
+    let page_n = parse_int(page) ? parse_int(page) : 1;
+    let total_n = parse_int(total) ? parse_int(total) : 0;
+    let per_page_n = parse_int(per_page) ? parse_int(per_page) : 20;
+    let shown_so_far = (page_n - 1) * per_page_n + pkg_objects.length();
+    print("Page " + page_n + ", showing " + pkg_objects.length() + " of " + total_n + " result(s).");
+    if (shown_so_far < total_n) {
+        print("Use --page " + (page_n + 1) + " to see more.");
+    }
+}

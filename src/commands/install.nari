@@ -1,0 +1,111 @@
+import FileUtils from "../../lib/file_utils.nari";
+import Path from "../../lib/path_utils.nari";
+import Manifest from "../../lib/manifest.nari";
+import Lockfile from "../../lib/lockfile.nari";
+import LockfileReader from "../../lib/lockfile_reader.nari";
+import Store from "../../lib/store.nari";
+import Workspace from "../../lib/workspace.nari";
+
+export func command_install(args) {
+    // Distinguish two forms:
+    //   npkg install [<dir>]          - install all deps of a project
+    //   npkg install <pkg[@ver]>      - add & install named packages into .
+    let project_dir = ".";
+    let pkg_specs = [];
+
+    if (args.length() > 1) {
+        if (Path.looks_like_path(args[1])) {
+            project_dir = args[1];
+        } else {
+            // everything after "install" treated as package specs
+            let i = 1;
+            while (i < args.length()) {
+                pkg_specs.push(args[i]);
+                i++;
+            }
+        }
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    // if bare package specs were given, resolve+add them to the manifest first
+    if (pkg_specs.length() > 0) {
+        let manifest = Manifest.load_manifest(project_dir);
+        let registries = manifest["registries"];
+        if (registries == null) { registries = []; }
+        for (spec in pkg_specs) {
+            let at_pos = spec.last_index_of("@");
+            let pkg_name = spec;
+            let requirement = "*";
+            if (at_pos > 0) {
+                pkg_name = spec.substr(0, at_pos);
+                requirement = spec.substr(at_pos + 1, spec.length());
+            }
+            let resolved_version = Store.query_latest_version(pkg_name, requirement, registries);
+            manifest["dependencies"][pkg_name] = { version: resolved_version };
+            print("Adding " + pkg_name + "@" + resolved_version + " to manifest");
+        }
+        let manifest_path = Path.join_path(project_dir, "nari.toml");
+        FileUtils.write_text(manifest_path, Manifest.render_manifest(manifest));
+    }
+
+    // workspace-aware lockfile placement:
+    // when the user runs `npkg install` inside a member dir,
+    // the canonical lockfile lives at the workspace root, so all members share resolution.
+    let workspace_for_lockfile = Workspace.discover_from(project_dir);
+    let lockfile_dir = project_dir;
+    let entry_required = true;
+    if (workspace_for_lockfile != null) {
+        lockfile_dir = workspace_for_lockfile["rootDir"];
+        // virtual workspace roots have no entry, packageable roots do.
+        entry_required = !workspace_for_lockfile["isVirtual"];
+    }
+    let lockfile_path = Path.join_path(lockfile_dir, "nari.lock.toml");
+
+    if (await fs.file_exists(lockfile_path)) {
+        let existing_text = await fs.read_file(lockfile_path);
+        if (existing_text != null) {
+            try {
+                let existing_lockfile = LockfileReader.parse_lockfile(existing_text);
+                let check_manifest = Manifest.load_manifest(lockfile_dir);
+                Manifest.validate_manifest(check_manifest, entry_required);
+                if (!Store.is_lockfile_stale(check_manifest, existing_lockfile)) {
+                    if (Store.all_packages_in_store(existing_lockfile)) {
+                        let names = existing_lockfile["packages"].keys();
+                        names.sort();
+                        for (name in names) {
+                            let pkg = existing_lockfile["packages"][name];
+                            print("  " + name + "@" + pkg["version"] + " (cached)");
+                        }
+                        print("All packages up to date.");
+                        return;
+                    }
+                    print("Some packages missing from store, re-resolving...");
+                } else {
+                    print("Lockfile out of date, re-resolving...");
+                }
+            } catch (err) {
+                print("Warning: could not verify lockfile: " @ err);
+            }
+        }
+    }
+
+    // resolve from the workspace root if present so every member is included.
+    let resolve_root = lockfile_dir;
+    let resolution = Store.resolve_project(resolve_root);
+    let lockfile_content = Lockfile.render_lockfile(
+        resolution["root"],
+        resolution["packages"],
+        resolution["workspace"],
+        resolution["members"]
+    );
+   FileUtils.write_text(lockfile_path, lockfile_content);
+
+    print("Wrote lockfile: " @ lockfile_path);
+    let names = resolution["packages"].keys();
+    names.sort();
+    for (name in names) {
+        let pkg = resolution["packages"][name];
+        print("Installed " @ pkg["name"] @ "@" @ pkg["version"] @ " -> " @ pkg["storePath"]);
+    }
+}

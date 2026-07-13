@@ -1,7 +1,12 @@
 import Path from "./path_utils.nari";
+import { load_saved_registry, normalize_registry_api_url } from "./registry.nari";
 
 func read_text(path) {
     return await fs.readFile(path);
+}
+
+func quote_string(value) {
+    return "\"" @ value.replace_all("\\", "\\\\").replace_all("\"", "\\\"") @ "\"";
 }
 
 func is_quote_char(text, index) {
@@ -330,4 +335,58 @@ export func validate_manifest(manifest, require_entry) {
 
 export func manifest_identity(manifest) {
     return manifest.name @ "@" @ manifest.version;
+}
+
+export func render_manifest(manifest) {
+    let lines = [];
+    lines.push("packageFormat = " @ manifest["packageFormat"]);
+    lines.push("name = " @ quote_string(manifest["name"]));
+    lines.push("version = " @ quote_string(manifest["version"]));
+    if (manifest.has_key("entry") && manifest["entry"] != null && manifest["entry"] != "") {
+        lines.push("entry = " @ quote_string(manifest["entry"]));
+    }
+    if (manifest.has_key("registries") && manifest["registries"] != null) {
+        let regs = manifest["registries"];
+        if (regs.length() > 0) {
+            let reg_items = [];
+            for (r in regs) {
+                reg_items.push(quote_string(r));
+            }
+            lines.push("registries = [" @ reg_items.join(", ") @ "]");
+        }
+    }
+    let dep_names = manifest["dependencies"].keys();
+    dep_names.sort();
+    if (dep_names.length() > 0) {
+        lines.push("");
+        lines.push("[dependencies]");
+        for (dep_name in dep_names) {
+            let spec = manifest["dependencies"][dep_name];
+            let spec_parts = [];
+            if (spec.has_key("version")) {
+                spec_parts.push("version = " @ spec["version"]);
+            } else if (spec.has_key("path")) {
+                spec_parts.push("path = " @ quote_string(spec["path"]));
+            }
+            lines.push(quote_string(dep_name) @ " = { " @ spec_parts.join(", ") @ " }");
+        }
+    }
+    return lines.join("\n") @ "\n";
+}
+
+export func resolve_registry_url(override_url, manifest) {
+    let registry_url = override_url;
+    if (registry_url == null || registry_url == "") {
+        registry_url = load_saved_registry();
+    }
+    if ((registry_url == null || registry_url == "") && manifest != null) {
+        let regs = manifest.has_key("registries") ? manifest["registries"] : [];
+        if (regs.length() > 0) {
+            registry_url = regs[0];
+        }
+    }
+    if (registry_url == null || registry_url == "") {
+        registry_url = "https://npkg.org/";
+    }
+    return normalize_registry_api_url(registry_url);
 }

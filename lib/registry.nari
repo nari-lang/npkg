@@ -1,4 +1,5 @@
 import Semver from "./semver.nari";
+import { npkg_credentials_path } from "./storage.nari";
 
 func read_registry_text(url) {
     let response = await http.fetch(url);
@@ -195,6 +196,42 @@ func normalize_base_url(url) {
     return url;
 }
 
+export func load_saved_registry() {
+    let registry_url = platform.getenv("NPKG_REGISTRY");
+    if (registry_url != null && registry_url != "") { return registry_url; }
+    let creds_path = npkg_credentials_path();
+    if (!creds_path || !await fs.file_exists(creds_path)) { return null; }
+    let text = await fs.read_file(creds_path);
+    if (text == null) { return null; }
+    let lines = text.split("\n");
+    for (line in lines) {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("NPKG_REGISTRY=")) {
+            return trimmed.substr(14, trimmed.length());
+        }
+    }
+    return null;
+}
+
+export func normalize_registry_api_url(registry_url) {
+    if (registry_url == null || registry_url == "") {
+        return null;
+    }
+    let url = registry_url.trim();
+    if (url.ends_with("/registry/index.toml")) {
+        url = url.substr(0, url.length() - 20);
+    } else if (url.ends_with("/index.toml")) {
+        url = url.substr(0, url.length() - 11);
+    } else if (url.ends_with("/registry")) {
+        url = url.substr(0, url.length() - 9);
+    }
+    if (url.ends_with("/")) {
+        url = url.substr(0, url.length() - 1);
+    }
+    return url;
+}
+
+
 export func load_registry(registry_url) {
     let content = read_registry_text(registry_url);
     let registry = {
@@ -308,4 +345,21 @@ export func find_satisfying_version(registry_url, package_name, requirement) {
     let entry = versions[best_version];
     validate_entry(entry, package_name, best_version, registry_url);
     return entry;
+}
+
+export func resolve_registry_url(override_url, manifest) {
+    let registry_url = override_url;
+    if (registry_url == null || registry_url == "") {
+        registry_url = load_saved_registry();
+    }
+    if ((registry_url == null || registry_url == "") && manifest != null) {
+        let regs = manifest.has_key("registries") ? manifest["registries"] : [];
+        if (regs.length() > 0) {
+            registry_url = regs[0];
+        }
+    }
+    if (registry_url == null || registry_url == "") {
+        registry_url = "https://npkg.org/";
+    }
+    return normalize_registry_api_url(registry_url);
 }

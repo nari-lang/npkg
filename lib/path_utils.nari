@@ -175,6 +175,10 @@ func segment_matches(segment, pattern) {
     return true;
 }
 
+export func looks_like_path(s) {
+    return s.starts_with("/") || s.starts_with("./") || s.starts_with("../") || s.starts_with("~");
+}
+
 // Expand one workspace member glob (e.g. "packages/*") relative to `root_dir`
 // into a list of absolute member directories that contain a nari.toml.
 export func expand_member_pattern(root_dir, pattern) {

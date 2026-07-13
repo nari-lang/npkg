@@ -1,0 +1,33 @@
+import Path from "../../lib/path_utils.nari";
+import LockfileReader from "../../lib/lockfile_reader.nari";
+import Store from "../../lib/store.nari";
+
+export func command_clean(args) {
+    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
+    let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
+
+    if (!await fs.file_exists(lockfile_path)) {
+        throw "No lockfile found at " + lockfile_path + ". Run `npkg install` first.";
+    }
+
+    let lockfile_text = await fs.read_file(lockfile_path);
+    if (lockfile_text == null) {
+        throw "Could not read lockfile at " + lockfile_path;
+    }
+
+    let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+
+    let referenced = {};
+    let pkg_names = lockfile["packages"].keys();
+    for (pkg_name in pkg_names) {
+        let store_path = lockfile["packages"][pkg_name]["storePath"];
+        referenced[store_path] = true;
+    }
+
+    let removed = Store.clean_store(referenced);
+    if (removed == 0) {
+        print("Store is clean, nothing to remove.");
+    } else {
+        print("Removed " + removed + " unused package(s) from store.");
+    }
+}

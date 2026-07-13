@@ -1,0 +1,72 @@
+import Path from "../../lib/path_utils.nari";
+import Manifest from "../../lib/manifest.nari";
+import LockfileReader from "../../lib/lockfile_reader.nari";
+import Store from "../../lib/store.nari";
+import { command_install } from "./install.nari";
+
+export func command_update(args) {
+    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
+    let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
+
+    let manifest = Manifest.load_manifest(project_dir);
+    Manifest.validate_manifest(manifest, true);
+    let registries = manifest["registries"];
+    if (registries == null) { registries = []; }
+
+    // read currently locked versions (if any)
+    let locked_versions = {};
+    if (await fs.file_exists(lockfile_path)) {
+        let lockfile_text = await fs.readFile(lockfile_path);
+        if (lockfile_text != null) {
+            try {
+                let lockfile = LockfileReader.parse_lockfile(lockfile_text);
+                let pkg_names = lockfile["packages"].keys();
+                for (pkg_name in pkg_names) {
+                    locked_versions[pkg_name] = lockfile["packages"][pkg_name]["version"];
+                }
+            } catch (err) {
+                print("Warning: could not read lockfile: " + err);
+            }
+        }
+    }
+
+    // Check each registry dep for a newer satisfying version
+    let upgrades_found = false;
+    let dep_names = manifest["dependencies"].keys();
+    dep_names.sort();
+    for (dep_name in dep_names) {
+        let spec = manifest["dependencies"][dep_name];
+        if (!spec.has_key("version")) {
+            continue; // path dep, skip
+        }
+        let constraint = spec["version"];
+        let current = locked_versions.has_key(dep_name) ? locked_versions[dep_name] : null;
+        try {
+            let latest = Store.query_latest_version(dep_name, constraint, registries);
+            if (current == null) {
+                print("  " + dep_name + ": (not installed) -> " + latest);
+                upgrades_found = true;
+            } else if (latest != current) {
+                print("  " + dep_name + ": " + current + " -> " + latest);
+                upgrades_found = true;
+            } else {
+                print("  " + dep_name + "@" + current + " (up to date)");
+            }
+        } catch (err) {
+            print("  " + dep_name + ": could not check - " + err);
+        }
+    }
+
+    if (!upgrades_found) {
+        print("All packages are up to date.");
+        return;
+    }
+
+    // Delete lockfile to force full re-resolution with latest versions
+    if (await fs.file_exists(lockfile_path)) {
+        await fs.deleteFile(lockfile_path);
+    }
+
+    let install_args = ["update", project_dir];
+    command_install(install_args);
+}
