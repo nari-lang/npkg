@@ -6,14 +6,11 @@ export func command_clean(args) {
     let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
     let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
 
-    if (!await fs.file_exists(lockfile_path)) {
-        throw "No lockfile found at " + lockfile_path + ". Run `npkg install` first.";
+    if (!fs.file_exists(lockfile_path).await) {
+        panic("No lockfile found at " + lockfile_path + ". Run `npkg install` first.");
     }
 
-    let lockfile_text = await fs.read_file(lockfile_path);
-    if (lockfile_text == null) {
-        throw "Could not read lockfile at " + lockfile_path;
-    }
+    let lockfile_text = fs.read_file(lockfile_path).await.unwrap();
 
     let lockfile = LockfileReader.parse_lockfile(lockfile_text);
 

@@ -21,12 +21,12 @@ export func command_init(args) {
     fs.mkdir_all(project_dir);
     fs.mkdir_all(Path.dirname(entry_path));
 
-    if (await fs.file_exists(manifest_path)) {
-        throw "Refusing to overwrite existing manifest at " @ manifest_path;
+    if (fs.file_exists(manifest_path).await) {
+        panic("Refusing to overwrite existing manifest at " @ manifest_path);
     }
 
     FileUtils.write_text(manifest_path, render_init_manifest(package_name));
-    if (!await fs.file_exists(entry_path)) {
+    if (!fs.file_exists(entry_path).await) {
         FileUtils.write_text(entry_path, render_init_entry(package_name));
     }
 

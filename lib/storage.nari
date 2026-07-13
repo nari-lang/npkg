@@ -37,13 +37,14 @@ export func load_credentials() {
     let token = platform.getenv("NPKG_TOKEN");
     if (token != null && token != "") { return token; }
     let creds_path = npkg_credentials_path();
-    if (!creds_path || !await fs.file_exists(creds_path)) {
+    if (!creds_path || !fs.file_exists(creds_path).await) {
         return null;
     }
     secure_credentials_dir(npkg_home_dir());
     secure_credentials_path(creds_path);
-    let text = await fs.read_file(creds_path);
-    if (text == null) { return null; }
+    let text_result = fs.read_file(creds_path).await;
+    if (text_result.is_err()) { return null; }
+    let text = text_result.unwrap();
     let lines = text.split("\n");
     for (line in lines) {
         let trimmed = line.trim();

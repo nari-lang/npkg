@@ -1,0 +1,25 @@
+export func parse_package_spec(spec) {
+    if (spec == null || spec == "") {
+        panic("Invalid empty package spec");
+    }
+
+    let package_name = spec;
+    let requirement = "*";
+    let at_pos = spec.last_index_of("@");
+    if (at_pos > 0) {
+        package_name = spec.substr(0, at_pos);
+        requirement = spec.substr(at_pos + 1, spec.length());
+        if (requirement == "") {
+            panic("Invalid package spec: " + spec);
+        }
+    }
+
+    if (package_name == "" || package_name == "@") {
+        panic("Invalid package spec: " + spec);
+    }
+    if (requirement == "latest") {
+        requirement = "*";
+    }
+
+    return { name: package_name, requirement: requirement };
+}

@@ -11,48 +11,45 @@ export func command_login(args) {
         let arg = args[i];
         if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else {
-            throw "Unknown argument: " @ arg;
+            panic("Unknown argument: " @ arg);
         }
         i++;
     }
 
     registry_url = Registry.resolve_registry_url(registry_url, null);
 
-    let session_resp = null;
-    try {
-        print(registry_url);
-        session_resp = await http.fetch(registry_url + "/api/auth/cli-session", {
+    print(registry_url);
+    let session_result = http.fetch(registry_url + "/api/auth/cli-session", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             },
-            body: JSON.stringify({})
-        });
-    } catch (e) {
-        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
+            body: JSON.stringify({}).unwrap()
+        }).await;
+    if (session_result.is_err()) {
+        panic("Failed to reach registry at " @ registry_url @ ". Is it running?");
     }
-    if (session_resp == null) {
-        throw "Failed to reach registry at " @ registry_url @ ". Is it running?";
-    }
+    let session_resp = session_result.unwrap();
     let session_sc = session_resp.status_code;
     if (session_sc < 200 || session_sc >= 300) {
         let err_body = session_resp.body;
         if (err_body == null) { err_body = ""; }
-        throw "Failed to create CLI session (HTTP " @ session_sc @ "): " @ err_body;
+        panic("Failed to create CLI session (HTTP " @ session_sc @ "): " @ err_body);
     }
     let session_text = session_resp.body;
-    if (session_text == null) { throw "Empty session response from registry."; }
-    let session_json = JSON.parse(session_text);
-    if (session_json == null) { throw "Invalid session response from registry: " @ session_text; }
+    if (session_text == null) { panic("Empty session response from registry."); }
+    let session_result_json = JSON.parse(session_text);
+    if (session_result_json.is_err()) { panic("Invalid session response from registry: " @ session_text); }
+    let session_json = session_result_json.unwrap();
     
     let session_id = session_json.sessionId;
     let login_url  = session_json.loginUrl;
     if (session_id == null || login_url == null) {
-        throw "Unexpected session response: " @ session_text;
+        panic("Unexpected session response: " @ session_text);
     }
 
     print("");
@@ -73,13 +70,16 @@ export func command_login(args) {
         system.exec("sleep 2");
         polls++;
 
-        let resp = await http.fetch(poll_url);
-        if (resp == null) { continue; }
+        let resp_result = http.fetch(poll_url).await;
+        if (resp_result.is_err()) { continue; }
+        let resp = resp_result.unwrap();
         if (resp.status_code == 410) {
-            throw "Login session expired. Run `npkg login` again.";
+            panic("Login session expired. Run `npkg login` again.");
         }
         if (resp.status_code >= 200 && resp.status_code < 300) {
-            let body = JSON.parse(resp.body);
+            let body_result = JSON.parse(resp.body);
+            if (body_result.is_err()) { continue; }
+            let body = body_result.unwrap();
             if (body.completed == true) {
                 api_key = body.apiKey;
                 break;
@@ -88,13 +88,13 @@ export func command_login(args) {
     }
 
     if (api_key == null) {
-        throw "Login timed out. Run `npkg login` again.";
+        panic("Login timed out. Run `npkg login` again.");
     }
 
     // Save credentials to ~/.nari/npkg/credentials
     let creds_dir = Storage.npkg_home_dir();
     if (creds_dir == null) {
-        throw "HOME is not set; cannot save credentials.";
+        panic("HOME is not set; cannot save credentials.");
     }
     fs.mkdir_all(creds_dir);
     Storage.secure_credentials_dir(creds_dir);

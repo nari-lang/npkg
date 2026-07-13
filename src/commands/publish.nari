@@ -20,11 +20,11 @@ export func command_publish(args) {
         let arg = args[i];
         if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else if (arg == "--token" || arg == "-t") {
             i++;
-            if (i >= args.length()) { throw "--token requires a value"; }
+            if (i >= args.length()) { panic("--token requires a value"); }
             token = args[i];
         } else if (arg == "--workspace" || arg == "--all") {
             workspace_mode = true;
@@ -35,7 +35,7 @@ export func command_publish(args) {
         } else if (!arg.starts_with("-")) {
             project_dir = arg;
         } else {
-            throw "Unknown flag: " @ arg;
+            panic("Unknown flag: " @ arg);
         }
         i++;
     }
@@ -46,18 +46,18 @@ export func command_publish(args) {
         token = Storage.load_credentials();
     }
     if (!dry_run && (token == null || token == "")) {
-        throw "No API token provided. Use --token <key> or set the NPKG_TOKEN environment variable.";
+        panic("No API token provided. Use --token <key> or set the NPKG_TOKEN environment variable.");
     }
 
     if (workspace_mode) {
         let workspace = Workspace.discover_from(project_dir);
         if (workspace == null) {
-            throw "--workspace requires a [workspace] table; no workspace found from " + project_dir;
+            panic("--workspace requires a [workspace] table; no workspace found from " + project_dir);
         }
 
         let members = workspace["members"];
         if (members.length() == 0) {
-            throw "Workspace has no members to publish";
+            panic("Workspace has no members to publish");
         }
 
         let order = Utils.topo_sort_workspace_members(members);

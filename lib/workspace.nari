@@ -4,12 +4,8 @@ import Manifest from "./manifest.nari";
 // Try to load the manifest at `dir`; return null if it doesn't validate
 func try_load_manifest(dir) {
     let manifest_path = Path.manifest_path(dir);
-    if (!await fs.file_exists(manifest_path)) { return null; }
-    try {
-        return Manifest.load_manifest(dir);
-    } catch (err) {
-        return null;
-    }
+    if (!fs.file_exists(manifest_path).await) { return null; }
+    return Manifest.load_manifest(dir);
 }
 
 // Walk upward from `start_dir` looking for the closest nari.toml that declares a `[workspace]` table.
@@ -52,7 +48,7 @@ func expand_members(root_dir, root_manifest) {
     return members;
 }
 
-// Load every workspace member's manifest. Throws on a member whose manifest fails to load.
+// Load every workspace member's manifest. Panics if a member manifest fails to load.
 func load_members(member_dirs) {
     let loaded = [];
     let by_name = {};
@@ -61,11 +57,11 @@ func load_members(member_dirs) {
         Manifest.validate_manifest(manifest, false);
         if (!Manifest.has_package(manifest)) {
             // A workspace member must be a publishable package
-            throw "Workspace member at " @ dir @ " has no name/version; nested workspaces are not supported";
+            panic("Workspace member at " @ dir @ " has no name/version; nested workspaces are not supported");
         }
         let name = manifest["name"];
         if (by_name.has_key(name)) {
-            throw "Duplicate workspace member name '" @ name @ "' at " @ dir @ " and " @ by_name[name]["rootDir"];
+            panic("Duplicate workspace member name '" @ name @ "' at " @ dir @ " and " @ by_name[name]["rootDir"]);
         }
         by_name[name] = manifest;
         loaded.push(manifest);
@@ -90,7 +86,7 @@ export func discover_from(start_dir) {
     if (Manifest.has_package(root_manifest)) {
         let root_name = root_manifest["name"];
         if (by_name.has_key(root_name)) {
-            throw "Workspace root package '" @ root_name @ "' collides with member at " @ by_name[root_name]["rootDir"];
+            panic("Workspace root package '" @ root_name @ "' collides with member at " @ by_name[root_name]["rootDir"]);
         }
         manifests = [root_manifest].concat(manifests);
         by_name[root_name] = root_manifest;

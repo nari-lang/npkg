@@ -33,8 +33,8 @@ func print_usage() {
     print("Usage:");
     print("  npkg init    [project_dir] [package_name] create a new project");
     print("  npkg install [project_dir]                install all deps of a project");
-    print("  npkg install <pkg[@ver]> ...              add & install packages into .");
-    print("  npkg add     [project_dir] <name@version> add a dep and install");
+    print("  npkg install <pkg[@ver|@latest]> ...      add & install packages into .");
+    print("  npkg add     [project_dir] <name[@version|@latest]> add a dep and install");
     print("  npkg update  [project_dir]                upgrade packages within constraints");
     print("  npkg list    [project_dir]                show installed packages");
     print("  npkg clean   [project_dir]                remove unused store entries");

@@ -12,15 +12,15 @@ export func command_search(args) {
         let arg = args[i];
         if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else if (arg == "--page" || arg == "-p") {
             i++;
-            if (i >= args.length()) { throw "--page requires a value"; }
+            if (i >= args.length()) { panic("--page requires a value"); }
             page = args[i];
         } else if (arg == "--per-page") {
             i++;
-            if (i >= args.length()) { throw "--per-page requires a value"; }
+            if (i >= args.length()) { panic("--per-page requires a value"); }
             per_page = args[i];
         } else if (!arg.starts_with("-")) {
             if (query == "") {
@@ -29,13 +29,13 @@ export func command_search(args) {
                 query = query @ " " @ arg;
             }
         } else {
-            throw "Unknown argument: " @ arg;
+            panic("Unknown argument: " @ arg);
         }
         i++;
     }
 
     if (query == "") {
-        throw "Usage: npkg search <query> [--registry <url>] [--page <n>]";
+        panic("Usage: npkg search <query> [--registry <url>] [--page <n>]");
     }
 
     registry_url = Registry.resolve_registry_url(registry_url, null);
@@ -43,15 +43,16 @@ export func command_search(args) {
     let encoded_query = URLUtils.url_encode_component(query);
     let url = registry_url + "/api/packages?q=" + encoded_query + "&page=" + page + "&per_page=" + per_page;
 
-    let resp = await http.fetch(url);
-    if (resp == null) {
-        throw "Failed to connect to registry at " + registry_url;
+    let resp_result = http.fetch(url).await;
+    if (resp_result.is_err()) {
+        panic("Failed to connect to registry at " + registry_url + ": " + resp_result.unwrap_err());
     }
+    let resp = resp_result.unwrap();
     if (resp.status_code != 200) {
-        throw "Registry returned error " + resp.status_code;
+        panic("Registry returned error " + resp.status_code);
     }
 
-    let body = JSON.parse(resp.body);
+    let body = JSON.parse(resp.body).unwrap();
 
     let total_str = body.total;
     let total = "0";

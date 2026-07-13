@@ -35,11 +35,11 @@ func parse_owner_mutate_args(args, verb) {
         let arg = args[i];
         if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else if (arg == "--token" || arg == "-t") {
             i++;
-            if (i >= args.length()) { throw "--token requires a value"; }
+            if (i >= args.length()) { panic("--token requires a value"); }
             token = args[i];
         } else if (!arg.starts_with("-")) {
             if (pkg_name == null) {
@@ -47,26 +47,26 @@ func parse_owner_mutate_args(args, verb) {
             } else if (target_user == null) {
                 target_user = arg;
             } else {
-                throw "Unexpected extra argument: " @ arg;
+                panic("Unexpected extra argument: " @ arg);
             }
         } else {
-            throw "Unknown flag: " @ arg;
+            panic("Unknown flag: " @ arg);
         }
         i++;
     }
 
     if (pkg_name == null || target_user == null) {
-        throw "Usage: npkg owner " @ verb @ " <name> <user> [--registry <url>] [--token <key>]";
+        panic("Usage: npkg owner " @ verb @ " <name> <user> [--registry <url>] [--token <key>]");
     }
     if (!valid_owner_username(target_user)) {
-        throw "Invalid username '" @ target_user @ "' (allowed: A-Z a-z 0-9 . _ -, max 64).";
+        panic("Invalid username '" @ target_user @ "' (allowed: A-Z a-z 0-9 . _ -, max 64).");
     }
 
     if (token == null) {
         token = Storage.load_credentials();
     }
     if (token == null || token == "") {
-        throw "No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.";
+        panic("No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.");
     }
 
     return {
@@ -79,8 +79,9 @@ func parse_owner_mutate_args(args, verb) {
 
 // surface the server-provided JSON {"error":"..."} verbatim when present
 func owner_failure_message(resp, verb) {
-    let body = JSON.parse(resp.body);
-    let server_msg = body.error;
+    let body_result = JSON.parse(resp.body);
+    let server_msg = null;
+    if (!body_result.is_err()) { server_msg = body_result.unwrap().error; }
     if (server_msg != null && server_msg != "") {
         return server_msg;
     }
@@ -97,9 +98,7 @@ func command_owner_add(args) {
     let url = parsed.registry + "/api/packages/" + URLUtils.url_encode_component(parsed.pkg) + "/owners";
     let body = "{\"username\":\"" + parsed.user + "\"}";
 
-    let resp = null;
-    try {
-        resp = await http.fetch(url, {
+    let resp_result = http.fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " + parsed.token,
@@ -107,15 +106,14 @@ func command_owner_add(args) {
                 "Accept": "application/json"
             },
             body: body
-        });
-    } catch (err) {
-        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+        }).await;
+    if (resp_result.is_err()) {
+        panic("Failed to reach registry at " + parsed.registry + ": " + resp_result.unwrap_err());
     }
-    if (resp == null) {
-        throw "Failed to connect to registry at " + parsed.registry;
-    }
+    let resp = resp_result.unwrap();
     if (resp.status_code >= 200 && resp.status_code < 300) {
-        let ok_msg = JSON.parse(resp.body).ok;
+        let body_result = JSON.parse(resp.body);
+        let ok_msg = body_result.is_err() ? null : body_result.unwrap().ok;
         if (ok_msg != null && ok_msg != "") {
             print(ok_msg);
         } else {
@@ -123,7 +121,7 @@ func command_owner_add(args) {
         }
         return;
     }
-    throw "owner add failed: " + owner_failure_message(resp, "add");
+    panic("owner add failed: " + owner_failure_message(resp, "add"));
 }
 
 func command_owner_rm(args) {
@@ -133,23 +131,20 @@ func command_owner_rm(args) {
               + "/owners/"
               + URLUtils.url_encode_component(parsed.user);
 
-    let resp = null;
-    try {
-        resp = await http.fetch(url, {
+    let resp_result = http.fetch(url, {
             method: "DELETE",
             headers: {
                 "Authorization": "Bearer " + parsed.token,
                 "Accept": "application/json"
             }
-        });
-    } catch (err) {
-        throw "Failed to reach registry at " + parsed.registry + ": " + err;
+        }).await;
+    if (resp_result.is_err()) {
+        panic("Failed to reach registry at " + parsed.registry + ": " + resp_result.unwrap_err());
     }
-    if (resp == null) {
-        throw "Failed to connect to registry at " + parsed.registry;
-    }
+    let resp = resp_result.unwrap();
     if (resp.status_code >= 200 && resp.status_code < 300) {
-        let ok_msg = JSON.parse(resp.body).ok;
+        let body_result = JSON.parse(resp.body);
+        let ok_msg = body_result.is_err() ? null : body_result.unwrap().ok;
         if (ok_msg != null && ok_msg != "") {
             print(ok_msg);
         } else {
@@ -157,7 +152,7 @@ func command_owner_rm(args) {
         }
         return;
     }
-    throw "owner rm failed: " + owner_failure_message(resp, "rm");
+    panic("owner rm failed: " + owner_failure_message(resp, "rm"));
 }
 
 func command_owner_ls(args) {
@@ -170,40 +165,37 @@ func command_owner_ls(args) {
         let arg = args[i];
         if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else if (!arg.starts_with("-")) {
             if (pkg_name != null) {
-                throw "Unexpected extra argument: " @ arg;
+                panic("Unexpected extra argument: " @ arg);
             }
             pkg_name = arg;
         } else {
-            throw "Unknown flag: " @ arg;
+            panic("Unknown flag: " @ arg);
         }
         i++;
     }
 
     if (pkg_name == null || pkg_name == "") {
-        throw "Usage: npkg owner ls <name> [--registry <url>]";
+        panic("Usage: npkg owner ls <name> [--registry <url>]");
     }
 
     registry_url = Registry.resolve_registry_url(registry_url, null);
 
     let url = registry_url @ "/api/packages/" @ URLUtils.url_encode_component(pkg_name) @ "/owners";
 
-    let resp = null;
-    try {
-        resp = await http.fetch(url);
-    } catch (err) {
-        throw "Failed to reach registry at " + registry_url + ": " + err;
+    let resp_result = http.fetch(url).await;
+    if (resp_result.is_err()) {
+        panic("Failed to reach registry at " + registry_url + ": " + resp_result.unwrap_err());
     }
-    if (resp == null) {
-        throw "Failed to connect to registry at " + registry_url;
-    }
+    let resp = resp_result.unwrap();
 
     if (resp.status_code < 200 || resp.status_code >= 300) {
-        let body = JSON.parse(resp.body);
-        let server_msg = body.error;
+        let body_result = JSON.parse(resp.body);
+        let server_msg = null;
+        if (!body_result.is_err()) { server_msg = body_result.unwrap().error; }
         if (server_msg == null || server_msg == "") {
             if (resp.status_code == 404) {
                 server_msg = "package not found";
@@ -211,10 +203,10 @@ func command_owner_ls(args) {
                 server_msg = "registry returned status " + resp.status_code;
             }
         }
-        throw "owner ls failed: " + server_msg;
+        panic("owner ls failed: " + server_msg);
     }
 
-    let body = JSON.parse(resp.body);
+    let body = JSON.parse(resp.body).unwrap();
     let owners_objects = body.owners;
     if (owners_objects == null) {
         // No "owners" key at all - defensive: server should always return it.
@@ -237,7 +229,7 @@ func command_owner_ls(args) {
 
 export func command_owner(args) {
     if (args.length() < 2) {
-        throw "Usage: npkg owner <ls|add|rm> ...";
+        panic("Usage: npkg owner <ls|add|rm> ...");
     }
     let sub = args[1];
     if (sub == "ls" || sub == "list") {
@@ -252,5 +244,5 @@ export func command_owner(args) {
         command_owner_rm(args);
         return;
     }
-    throw "Unknown owner subcommand: " + sub + " (expected: ls, add, rm)";
+    panic("Unknown owner subcommand: " + sub + " (expected: ls, add, rm)");
 }

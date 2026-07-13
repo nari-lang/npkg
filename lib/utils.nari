@@ -69,7 +69,7 @@ export func rewrite_manifest_for_publish(text, version_overrides) {
 
 // Topologically sort workspace members so producers come before consumers.
 // Cross-member edges are introduced by deps whose name matches another
-// member; non-workspace deps are ignored. Throws on cycles.
+// member; non-workspace deps are ignored. Panics on cycles.
 export func topo_sort_workspace_members(members) {
     let by_name = {};
     for (m in members) { by_name[m["name"]] = m; }
@@ -82,7 +82,7 @@ export func topo_sort_workspace_members(members) {
     visit = export func(name) {
         if (visited.has_key(name)) { return; }
         if (visiting.has_key(name)) {
-            throw "Workspace dependency cycle detected at member " + name;
+            panic("Workspace dependency cycle detected at member " + name);
         }
         visiting[name] = true;
         let cur = by_name[name];

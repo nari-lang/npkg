@@ -15,38 +15,38 @@ export func command_unpublish(args) {
         let arg = args[i];
         if (arg == "--version" || arg == "-v") {
             i++;
-            if (i >= args.length()) { throw "--version requires a value"; }
+            if (i >= args.length()) { panic("--version requires a value"); }
             version = args[i];
         } else if (arg == "--registry" || arg == "-r") {
             i++;
-            if (i >= args.length()) { throw "--registry requires a value"; }
+            if (i >= args.length()) { panic("--registry requires a value"); }
             registry_url = args[i];
         } else if (arg == "--token" || arg == "-t") {
             i++;
-            if (i >= args.length()) { throw "--token requires a value"; }
+            if (i >= args.length()) { panic("--token requires a value"); }
             token = args[i];
         } else if (arg == "--yes" || arg == "-y") {
             assume_yes = true;
         } else if (!arg.starts_with("-")) {
             if (pkg_name != null) {
-                throw "Unexpected extra argument: " @ arg;
+                panic("Unexpected extra argument: " @ arg);
             }
             pkg_name = arg;
         } else {
-            throw "Unknown flag: " @ arg;
+            panic("Unknown flag: " @ arg);
         }
         i++;
     }
 
     if (pkg_name == null || pkg_name == "") {
-        throw "Usage: npkg unpublish <name> [--version <v>] [--registry <url>] [--yes]";
+        panic("Usage: npkg unpublish <name> [--version <v>] [--registry <url>] [--yes]");
     }
 
     if (token == null) {
         token = Storage.load_credentials();
     }
     if (token == null || token == "") {
-        throw "No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.";
+        panic("No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.");
     }
 
     registry_url = Registry.resolve_registry_url(registry_url, null);
@@ -63,13 +63,13 @@ export func command_unpublish(args) {
         print("About to permanently delete " + target_desc + " from " + registry_url + ".");
         print("This cannot be undone.");
         print("Continue? [y/N]");
-        // io.stdin.readLine returns null on EOF (e.g. piped or non-TTY input).
+        // io.stdin.read_line returns null on EOF (e.g. piped or non-TTY input).
         // Treat that as a refusal rather than a silent yes.
-        let answer = io.stdin.readLine();
+        let answer = io.stdin.read_line();
         if (answer == null) {
-            throw "Aborted: no response from stdin (use --yes to bypass the prompt).";
+            panic("Aborted: no response from stdin (use --yes to bypass the prompt).");
         }
-        let trimmed = answer.trim().toLower();
+        let trimmed = answer.trim().to_lower();
         if (trimmed != "y" && trimmed != "yes") {
             print("Aborted.");
             return;
@@ -82,22 +82,17 @@ export func command_unpublish(args) {
     }
     let url = registry_url + path;
 
-    let resp = null;
-    try {
-        resp = await http.fetch(url, {
+    let resp_result = http.fetch(url, {
             method: "DELETE",
             headers: {
                 "Authorization": "Bearer " + token,
                 "Accept": "application/json"
             }
-        });
-    } catch (err) {
-        throw "Failed to reach registry at " + registry_url + ": " + err;
+        }).await;
+    if (resp_result.is_err()) {
+        panic("Failed to reach registry at " + registry_url + ": " + resp_result.unwrap_err());
     }
-
-    if (resp == null) {
-        throw "Failed to connect to registry at " + registry_url;
-    }
+    let resp = resp_result.unwrap();
 
     if (resp.status_code >= 200 && resp.status_code < 300) {
         print("Deleted " + target_desc + ".");
@@ -105,8 +100,9 @@ export func command_unpublish(args) {
     }
 
     // Try to surface the server-provided error message
-    let body = JSON.parse(resp.body);
-    let server_msg = body.error;
+    let body_result = JSON.parse(resp.body);
+    let server_msg = null;
+    if (!body_result.is_err()) { server_msg = body_result.unwrap().error; }
 
     if (server_msg == null || server_msg == "") {
         if (resp.status_code == 401) {
@@ -122,5 +118,5 @@ export func command_unpublish(args) {
         }
     }
 
-    throw "Unpublish failed: " + server_msg;
+    panic("Unpublish failed: " + server_msg);
 }

@@ -5,5 +5,5 @@ export func write_text(path, content) {
     if (parent != "." && parent != "") {
         fs.mkdir_all(parent);
     }
-    return await fs.write_file(path, content);
+    return fs.write_file(path, content).await.unwrap();
 }
