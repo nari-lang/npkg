@@ -71,11 +71,11 @@ func parse_section_header(section_content) {
         }
         if (ch == 92 && i + 1 < rest.length()) {
             i++;
-            pkg_name = pkg_name @ rest.charAt(i);
+            pkg_name = pkg_name @ rest.char_at(i);
             i++;
             continue;
         }
-        pkg_name = pkg_name @ rest.charAt(i);
+        pkg_name = pkg_name @ rest.char_at(i);
         i++;
     }
 
@@ -124,12 +124,12 @@ func parse_string_array(raw) {
             let ch = inner.char_code_at(i);
             if (ch == 92 && i + 1 < inner.length()) {
                 i++;
-                value = value @ inner.charAt(i);
+                value = value @ inner.char_at(i);
                 i++;
                 continue;
             }
             if (ch == 34) { break; }
-            value = value @ inner.charAt(i);
+            value = value @ inner.char_at(i);
             i++;
         }
         items.push(value);
@@ -145,8 +145,8 @@ func parse_value(raw) {
     if (t.char_code_at(0) == 91) { return parse_string_array(t); }
     if (t == "true") { return true; }
     if (t == "false") { return false; }
-    if (t.index_of(".") != -1) { return parseFloat(t); }
-    return parseInt(t);
+    if (t.index_of(".") != -1) { return parse_float(t); }
+    return parse_int(t);
 }
 
 export func parse_lockfile(content) {

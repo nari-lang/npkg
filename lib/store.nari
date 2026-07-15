@@ -8,7 +8,7 @@ import Semver from "./semver.nari";
 import Workspace from "./workspace.nari";
 
 func read_text(path) {
-    return await fs.read_file(path);
+    return fs.read_file(path).await.unwrap();
 }
 
 func write_text(path, content) {
@@ -16,24 +16,21 @@ func write_text(path, content) {
     if (parent != "." && parent != "") {
         fs.mkdir_all(parent);
     }
-    return await fs.write_file(path, content);
+    return fs.write_file(path, content).await.unwrap();
 }
 
 func list_dir(path) {
-    let items = await fs.list_dir(path);
-    if (items == null) {
-        return [];
-    }
-    return items;
+    return fs.list_dir(path).await.unwrap();
 }
 
 func fetch_binary(url) {
-    let response = await http.fetch(url);
-    if (response == null) {
-        throw "Failed to download " @ url;
+    let response_result = http.fetch(url).await;
+    if (response_result.is_err()) {
+        panic("Failed to download " @ url @ ": " @ response_result.unwrap_err());
     }
+    let response = response_result.unwrap();
     if (response.status_code < 200 || response.status_code >= 300) {
-        throw "Failed to download " @ url @ ": HTTP " @ response.status_code;
+        panic("Failed to download " @ url @ ": HTTP " @ response.status_code);
     }
     return response.body;
 }
@@ -46,13 +43,13 @@ func shell_escape(text) {
 func run_shell(command, failure_message) {
     let code = system.exec(command);
     if (code != 0) {
-        throw failure_message @ " (exit code " @ code @ ")";
+        panic(failure_message @ " (exit code " @ code @ ")");
     }
 }
 
 func rm_rf(path) {
     if (path == null || path == "" || path == "." || path == "/") {
-        throw "Refusing to delete unsafe path " @ path;
+        panic("Refusing to delete unsafe path " @ path);
     }
     system.exec("rm -rf " @ shell_escape(path));
 }
@@ -60,7 +57,7 @@ func rm_rf(path) {
 func cache_root() {
     let home = platform.getenv("HOME");
     if (home == null || home == "") {
-        throw "HOME environment variable is not set";
+        panic("HOME environment variable is not set");
     }
     let root = Path.join_path(home, ".nari/cache/npkg");
     fs.mkdir_all(root);
@@ -73,41 +70,51 @@ func write_download(path, content) {
 }
 
 func verify_archive_integrity(archive_path, integrity, package_name, version) {
-    if (!integrity.starts_with("sha256-")) {
-        throw "Unsupported integrity format for " + package_name + "@" + version + ": expected sha256-...";
-    }
+    let expected_hash = expected_integrity_hash(integrity, package_name, version);
 
-    let expected_hash = integrity.substr(7, integrity.length()).toLower();
-    if (expected_hash.length() != 64) {
-        throw "Malformed sha256 integrity for " + package_name + "@" + version + ": expected 64 hex chars, got " + expected_hash.length();
-    }
-
-    let actual_hash = Hash.sha256File(archive_path);
+    let actual_hash = Hash.sha256_file(archive_path);
     if (actual_hash != expected_hash) {
-        throw "Integrity check failed for " + package_name + "@" + version + ": expected sha256-" + expected_hash + ", got sha256-" + actual_hash;
+        panic("Integrity check failed for " + package_name + "@" + version + ": expected sha256-" + expected_hash + ", got sha256-" + actual_hash);
     }
+}
+
+func expected_integrity_hash(integrity, package_name, version) {
+    if (!integrity.starts_with("sha256-")) {
+        panic("Unsupported integrity format for " + package_name + "@" + version + ": expected sha256-...");
+    }
+
+    let expected_hash = integrity.substr(7, integrity.length()).to_lower();
+    if (expected_hash.length() != 64) {
+        panic("Malformed sha256 integrity for " + package_name + "@" + version + ": expected 64 hex chars, got " + expected_hash.length());
+    }
+    return expected_hash;
+}
+
+func cache_busted_url(url, integrity) {
+    let separator = url.index_of("?") == -1 ? "?" : "&";
+    return url + separator + "integrity=" + integrity;
 }
 
 func extract_archive(archive_path, extract_dir, package_name, version) {
     fs.mkdir_all(extract_dir);
-    Archive.extract(archive_path, extract_dir, null);
+    Archive.extract(archive_path, extract_dir, null).unwrap();
 }
 
 func archive_root_dir(extract_dir) {
     let manifest_path = Path.join_path(extract_dir, "nari.toml");
-    if (await fs.file_exists(manifest_path)) {
+    if (fs.file_exists(manifest_path).await) {
         return extract_dir;
     }
 
     let entries = list_dir(extract_dir);
     if (entries.length() == 1) {
         let only_entry = Path.join_path(extract_dir, entries[0]);
-        if (fs.is_directory(only_entry) && await fs.file_exists(Path.join_path(only_entry, "nari.toml"))) {
+        if (fs.is_directory(only_entry) && fs.file_exists(Path.join_path(only_entry, "nari.toml")).await) {
             return only_entry;
         }
     }
 
-    throw "Extracted archive does not contain a package root with nari.toml at " @ extract_dir;
+    panic("Extracted archive does not contain a package root with nari.toml at " @ extract_dir);
 }
 
 func should_skip_name(name) {
@@ -164,12 +171,12 @@ func copy_tree(source_dir, destination_dir) {
         let source_path = Path.join_path(source_dir, name);
         let destination_path = Path.join_path(destination_dir, name);
 
-        if (fs.isDirectory(source_path)) {
+        if (fs.is_directory(source_path)) {
             copy_tree(source_path, destination_path);
         } else {
             let content = read_text(source_path);
             if (content == null) {
-                throw "Failed to copy file: " @ source_path;
+                panic("Failed to copy file: " @ source_path);
             }
             write_text(destination_path, content);
         }
@@ -179,7 +186,7 @@ func copy_tree(source_dir, destination_dir) {
 export func store_root() {
     let home = platform.getenv("HOME");
     if (home == null || home == "") {
-        throw "HOME environment variable is not set";
+        panic("HOME environment variable is not set");
     }
     let root = Path.join_path(home, ".nari/store/pkg");
     fs.mkdir_all(root);
@@ -227,20 +234,17 @@ func materialize_registry_package(package_name, version, integrity, archive_url)
         rm_rf(working_dir);
         fs.mkdir_all(working_dir);
 
-        try {
-            write_download(archive_path, fetch_binary(archive_url));
-
-            verify_archive_integrity(archive_path, integrity, package_name, version);
-            extract_archive(archive_path, extract_dir, package_name, version);
-
-            let package_root = archive_root_dir(extract_dir);
-            copy_tree(package_root, store_path);
-        } catch (err) {
-            rm_rf(store_path);
-            throw err;
-        } finally {
-            rm_rf(working_dir);
+        write_download(archive_path, fetch_binary(archive_url));
+        let expected_hash = expected_integrity_hash(integrity, package_name, version);
+        if (Hash.sha256_file(archive_path) != expected_hash) {
+            write_download(archive_path, fetch_binary(cache_busted_url(archive_url, expected_hash)));
         }
+        verify_archive_integrity(archive_path, integrity, package_name, version);
+        extract_archive(archive_path, extract_dir, package_name, version);
+
+        let package_root = archive_root_dir(extract_dir);
+        copy_tree(package_root, store_path);
+        rm_rf(working_dir);
     }
 
     return {
@@ -259,9 +263,10 @@ func normalize_registry_list(registries) {
         let home = platform.getenv("HOME");
         if (home != null) {
             let creds_path = Path.join_path(home, ".nari/npkg/credentials");
-            if (await fs.file_exists(creds_path)) {
-                let text = await fs.read_file(creds_path);
-                if (text != null) {
+            if (fs.file_exists(creds_path).await) {
+                let text_result = fs.read_file(creds_path).await;
+                if (!text_result.is_err()) {
+                    let text = text_result.unwrap();
                     let lines = text.split("\n");
                     for (line in lines) {
                         let trimmed = line.trim();
@@ -304,59 +309,50 @@ func make_resolved_manifest(manifest, source, package_integrity, store_path, reg
 
 func resolve_registry_manifest(manifest, dependency_name, version_requirement, registries) {
     if (version_requirement == null || version_requirement == "") {
-        throw "Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify a non-empty version";
+        panic("Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify a non-empty version");
     }
 
     let registry_urls = normalize_registry_list(registries);
     if (registry_urls.length() == 0) {
-        throw "Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " requires a registry version, but no registries are configured";
+        panic("Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " requires a registry version, but no registries are configured");
     }
 
-    let last_error = "";
     for (registry_url in registry_urls) {
-        try {
-            let entry = Registry.find_satisfying_version(registry_url, dependency_name, version_requirement);
-            if (entry != null) {
-                let resolved_package_name = entry["packageName"];
-                let resolved_version = entry["version"];
-                let resolved_integrity = entry["integrity"];
-                let resolved_archive_url = entry["archiveUrl"];
+        let entry = Registry.find_satisfying_version(registry_url, dependency_name, version_requirement);
+        if (entry != null) {
+            let resolved_package_name = entry["packageName"];
+            let resolved_version = entry["version"];
+            let resolved_integrity = entry["integrity"];
+            let resolved_archive_url = entry["archiveUrl"];
 
-                let materialized = materialize_registry_package(
-                    resolved_package_name,
-                    resolved_version,
-                    resolved_integrity,
-                    resolved_archive_url
-                );
-                let dependency_manifest = Manifest.load_manifest(materialized["storePath"]);
-                Manifest.validate_manifest(dependency_manifest, false);
+            let materialized = materialize_registry_package(
+                resolved_package_name,
+                resolved_version,
+                resolved_integrity,
+                resolved_archive_url
+            );
+            let dependency_manifest = Manifest.load_manifest(materialized["storePath"]);
+            Manifest.validate_manifest(dependency_manifest, false);
 
-                if (dependency_manifest["name"] != dependency_name) {
-                    throw "Expected package name " + dependency_name + " but registry package declared " + dependency_manifest["name"];
-                }
-                if (!Semver.satisfies(dependency_manifest["version"], version_requirement)) {
-                    throw "Package " + dependency_name + " declared version " + dependency_manifest["version"] +
-                          " which does not satisfy constraint " + version_requirement;
-                }
-
-                return make_resolved_manifest(
-                    dependency_manifest,
-                    "registry",
-                    materialized["packageIntegrity"],
-                    materialized["storePath"],
-                    registry_url
-                );
+            if (dependency_manifest["name"] != dependency_name) {
+                panic("Expected package name " + dependency_name + " but registry package declared " + dependency_manifest["name"]);
             }
-        } catch (err) {
-            last_error = err;
+            if (!Semver.satisfies(dependency_manifest["version"], version_requirement)) {
+                panic("Package " + dependency_name + " declared version " + dependency_manifest["version"] +
+                      " which does not satisfy constraint " + version_requirement);
+            }
+
+            return make_resolved_manifest(
+                dependency_manifest,
+                "registry",
+                materialized["packageIntegrity"],
+                materialized["storePath"],
+                registry_url
+            );
         }
     }
 
-    if (last_error != "") {
-        throw last_error;
-    }
-
-    throw "Could not find registry dependency '" + dependency_name + "@" + version_requirement + "' for " + manifest["manifestPath"];
+    panic("Could not find registry dependency '" + dependency_name + "@" + version_requirement + "' for " + manifest["manifestPath"]);
 }
 
 // Resolve the highest available version of a package satisfying `requirement`
@@ -367,30 +363,22 @@ export func query_latest_version(package_name, requirement, registry_urls) {
     }
     let urls = normalize_registry_list(registry_urls);
     if (urls.length() == 0) {
-        throw "No registries configured. Add a registries = [...] line to your nari.toml before installing registry packages.";
+        panic("No registries configured. Add a registries = [...] line to your nari.toml before installing registry packages.");
     }
     let best_version = null;
-    let last_error = "";
     for (registry_url in urls) {
-        try {
-            let entry = Registry.find_satisfying_version(registry_url, package_name, req);
-            if (entry != null) {
-                let v = entry["version"];
-                if (best_version == null || Semver.compare(v, best_version) > 0) {
-                    best_version = v;
-                }
+        let entry = Registry.find_satisfying_version(registry_url, package_name, req);
+        if (entry != null) {
+            let v = entry["version"];
+            if (best_version == null || Semver.compare(v, best_version) > 0) {
+                best_version = v;
             }
-        } catch (err) {
-            last_error = err;
         }
     }
     if (best_version != null) {
         return best_version;
     }
-    if (last_error != "") {
-        throw last_error;
-    }
-    throw "Could not find package '" + package_name + "' satisfying '" + req + "' in any configured registry";
+    panic("Could not find package '" + package_name + "' satisfying '" + req + "' in any configured registry");
 }
 
 // check whether `packages` still satisfies every dependency listed in `manifest`
@@ -458,7 +446,7 @@ export func all_packages_in_store(lockfile) {
     let packages = lockfile["packages"];
     let names = packages.keys();
     for (name in names) {
-        if (!fs.isDirectory(packages[name]["storePath"])) {
+        if (!fs.is_directory(packages[name]["storePath"])) {
             return false;
         }
     }
@@ -489,8 +477,8 @@ func resolve_dependency_manifest(manifest, dependency_name, spec, registries, wo
             // Verify version range against the local member if one was given.
             if (spec.has_key("version") && spec["version"] != "*") {
                 if (!Semver.satisfies(member["version"], spec["version"])) {
-                    throw "Workspace member '" + dependency_name + "' is at " + member["version"] +
-                          " which does not satisfy '" + spec["version"] + "' required by " + manifest["manifestPath"];
+                    panic("Workspace member '" + dependency_name + "' is at " + member["version"] +
+                          " which does not satisfy '" + spec["version"] + "' required by " + manifest["manifestPath"]);
                 }
             }
             return make_resolved_manifest(member, "workspace", null, null, null);
@@ -500,45 +488,41 @@ func resolve_dependency_manifest(manifest, dependency_name, spec, registries, wo
     if (spec.has_key("path")) {
         let dependency_path = spec["path"];
         if (dependency_path == null || dependency_path == "") {
-            throw "Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify a non-empty path";
+            panic("Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify a non-empty path");
         }
 
         let dependency_root = Path.normalize_path(Path.join_path(manifest["rootDir"], dependency_path));
         if (!fs.is_directory(dependency_root)) {
-            throw "Could not resolve path dependency '" + dependency_name + "' from " + manifest["manifestPath"] + ": directory not found at " + dependency_root;
+            panic("Could not resolve path dependency '" + dependency_name + "' from " + manifest["manifestPath"] + ": directory not found at " + dependency_root);
         }
 
         let dependency_manifest_path = Path.manifest_path(dependency_root);
-        if (!await fs.file_exists(dependency_manifest_path)) {
-            throw "Could not resolve path dependency '" + dependency_name + "' from " + manifest["manifestPath"] + ": missing manifest at " + dependency_manifest_path;
+        if (!fs.file_exists(dependency_manifest_path).await) {
+            panic("Could not resolve path dependency '" + dependency_name + "' from " + manifest["manifestPath"] + ": missing manifest at " + dependency_manifest_path);
         }
 
-        try {
-            let dependency_manifest = Manifest.load_manifest(dependency_root);
-            Manifest.validate_manifest(dependency_manifest, false);
-            return make_resolved_manifest(dependency_manifest, "path", null, null, null);
-        } catch (err) {
-            throw "Failed to load dependency '" + dependency_name + "' from " + dependency_manifest_path + ": " + err;
-        }
+        let dependency_manifest = Manifest.load_manifest(dependency_root);
+        Manifest.validate_manifest(dependency_manifest, false);
+        return make_resolved_manifest(dependency_manifest, "path", null, null, null);
     }
 
     if (spec.has_key("version")) {
         return resolve_registry_manifest(manifest, dependency_name, spec["version"], registries);
     }
 
-    throw "Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify either path or version";
+    panic("Dependency '" + dependency_name + "' in " + manifest["manifestPath"] + " must specify either path or version");
 }
 
 func resolve_manifest_recursive(resolved_manifest, resolved_packages, visiting_roots, registries, workspace) {
     let manifest = resolved_manifest["manifest"];
     if (visiting_roots.has_key(manifest["rootDir"]) && visiting_roots[manifest["rootDir"]]) {
-        throw "Dependency cycle detected at " + manifest["rootDir"];
+        panic("Dependency cycle detected at " + manifest["rootDir"]);
     }
 
     if (resolved_packages.has_key(manifest["name"])) {
         let existing = resolved_packages[manifest["name"]];
         if (existing["version"] != manifest["version"]) {
-            throw "Flat dependency graph conflict for " + manifest["name"] + ": " + existing["version"] + " vs " + manifest["version"];
+            panic("Flat dependency graph conflict for " + manifest["name"] + ": " + existing["version"] + " vs " + manifest["version"]);
         }
         return existing;
     }

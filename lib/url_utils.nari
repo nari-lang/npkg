@@ -1,0 +1,22 @@
+export func url_encode_component(text) {
+    let HEX = "0123456789ABCDEF";
+    let out = "";
+    let i = 0;
+    while (i < text.length()) {
+        let c = text.char_at(i);
+        let code = text.char_code_at(i);
+        let unreserved = (code >= 65 && code <= 90) ||
+                         (code >= 97 && code <= 122) ||
+                         (code >= 48 && code <= 57) ||
+                         c == "-" || c == "_" || c == "." || c == "~";
+        if (unreserved) {
+            out = out @ c;
+        } else {
+            let lo = code % 16;
+            let hi = (code - lo) / 16;
+            out = out @ "%" @ HEX.char_at(hi) @ HEX.char_at(lo);
+        }
+        i++;
+    }
+    return out;
+}

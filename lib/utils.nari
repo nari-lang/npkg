@@ -1,0 +1,101 @@
+// Rewrite a dep line: `workspace = true` becomes a concrete registry dep
+// using `version_overrides[name]`. Deps not in the map pass through.
+//   { workspace = true }              -> "<version>"
+//   { version = "X", workspace = true } -> { version = "X" }
+//   "X" (no workspace marker)         -> unchanged
+export func rewrite_publish_dep_line(line, version_overrides) {
+    let trimmed = line.trim();
+    if (trimmed == "" || trimmed.starts_with("#")) { return line; }
+
+    // split key = value at the first unquoted '='.
+    let eq = -1;
+    let in_quotes = false;
+    let j = 0;
+    while (j < line.length()) {
+        let c = line.char_at(j);
+        if (c == "\"") { in_quotes = !in_quotes; }
+        else if (c == "=" && !in_quotes) { eq = j; break; }
+        j++;
+    }
+    if (eq == -1) { return line; }
+
+    let raw_key = line.substr(0, eq).trim();
+    let value = line.substr(eq + 1, line.length() - eq - 1).trim();
+
+    // Unquote key (TOML keys may be bare or quoted).
+    let key = raw_key;
+    if (key.length() >= 2 && key.char_at(0) == "\"" && key.char_at(key.length() - 1) == "\"") {
+        key = key.substr(1, key.length() - 2);
+    }
+
+    if (!version_overrides.has_key(key)) { return line; }
+    let pinned = version_overrides[key];
+
+    // If the value is not an inline table, leave it alone (already a pinned version string).
+    if (!(value.length() >= 2 && value.char_at(0) == "{" && value.char_at(value.length() - 1) == "}")) {
+        return line;
+    }
+
+    let inner = value.substr(1, value.length() - 2).trim();
+    if (inner.index_of("workspace") == -1) { return line; }
+
+    // Re-emit a clean inline table or bare version
+    let key_out = "\"" @ key @ "\"";
+    return key_out @ " = \"" @ pinned @ "\"";
+}
+
+// Rewrite a manifest's text so any workspace = true dependencies become resolved version-pinned entries suitable for upload.
+export func rewrite_manifest_for_publish(text, version_overrides) {
+    let lines = text.split("\n");
+    let in_deps = false;
+    let result = [];
+    let i = 0;
+    while (i < lines.length()) {
+        let line = lines[i];
+        let stripped = line.trim();
+        if (stripped.length() >= 2 && stripped.char_at(0) == "[" && stripped.char_at(stripped.length() - 1) == "]") {
+            let header = stripped.substr(1, stripped.length() - 2).trim();
+            in_deps = (header == "dependencies");
+            result.push(line);
+        } else if (in_deps) {
+            result.push(rewrite_publish_dep_line(line, version_overrides));
+        } else {
+            result.push(line);
+        }
+        i++;
+    }
+    return result.join("\n");
+}
+
+// Topologically sort workspace members so producers come before consumers.
+// Cross-member edges are introduced by deps whose name matches another
+// member; non-workspace deps are ignored. Panics on cycles.
+export func topo_sort_workspace_members(members) {
+    let by_name = {};
+    for (m in members) { by_name[m["name"]] = m; }
+
+    let visited = {};   // name -> "done"
+    let visiting = {};  // name -> true (cycle detection)
+    let order = [];
+
+    let visit = null;
+    visit = export func(name) {
+        if (visited.has_key(name)) { return; }
+        if (visiting.has_key(name)) {
+            panic("Workspace dependency cycle detected at member " + name);
+        }
+        visiting[name] = true;
+        let cur = by_name[name];
+        let dep_names = cur["dependencies"].keys();
+        for (dep_name in dep_names) {
+            if (by_name.has_key(dep_name)) {
+                visit(dep_name);
+            }
+        }
+        visited[name] = "done";
+        order.push(cur);
+    };
+
+    for (m in members) { visit(m["name"]); }
+    return order;
+}

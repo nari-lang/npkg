@@ -1,7 +1,12 @@
 import Path from "./path_utils.nari";
+import { load_saved_registry, normalize_registry_api_url } from "./registry.nari";
 
-func read_text(path) {
-    return await fs.readFile(path);
+func read_manifest_text(path) {
+    return fs.read_file(path).await.unwrap();
+}
+
+func quote_string(value) {
+    return "\"" @ value.replace_all("\\", "\\\\").replace_all("\"", "\\\"") @ "\"";
 }
 
 func is_quote_char(text, index) {
@@ -60,7 +65,7 @@ func find_unquoted_char(text, needle) {
                 depth_bracket++;
             } else if (ch == 93) {
                 depth_bracket--;
-            } else if (text.charAt(i) == needle && depth_brace == 0 && depth_bracket == 0) {
+            } else if (text.char_at(i) == needle && depth_brace == 0 && depth_bracket == 0) {
                 return i;
             }
         }
@@ -93,7 +98,7 @@ func split_top_level(text, separator) {
                 depth_bracket++;
             } else if (ch == 93) {
                 depth_bracket--;
-            } else if (text.charAt(i) == separator && depth_brace == 0 && depth_bracket == 0) {
+            } else if (text.char_at(i) == separator && depth_brace == 0 && depth_bracket == 0) {
                 items.push(text.substr(start, i - start).trim());
                 start = i + 1;
             }
@@ -136,10 +141,10 @@ func parse_scalar(raw) {
         return false;
     }
     if (trimmed.index_of(".") != -1) {
-        let parsed_float = parseFloat(trimmed);
+        let parsed_float = parse_float(trimmed);
         return parsed_float;
     }
-    let parsed_int = parseInt(trimmed);
+    let parsed_int = parse_int(trimmed);
     return parsed_int;
 }
 
@@ -178,7 +183,7 @@ func is_unquoted_version_token(text) {
 func parse_dependency_spec(raw) {
     let trimmed = raw.trim();
     if (!(trimmed.length() >= 2 && trimmed.char_code_at(0) == 123 && trimmed.char_code_at(trimmed.length() - 1) == 125)) {
-        throw "Dependency entries must use inline tables";
+        panic("Dependency entries must use inline tables");
     }
 
     let inner = trimmed.substr(1, trimmed.length() - 2).trim();
@@ -191,7 +196,7 @@ func parse_dependency_spec(raw) {
     for (part in parts) {
         let eq = find_unquoted_char(part, "=");
         if (eq == -1) {
-            throw "Invalid dependency spec: " @ part;
+            panic("Invalid dependency spec: " @ part);
         }
         let key = unquote(part.substr(0, eq).trim());
         let value = part.substr(eq + 1, part.length() - eq - 1).trim();
@@ -207,9 +212,9 @@ func parse_dependency_spec(raw) {
 export func load_manifest(project_root) {
     let root_dir = Path.normalize_path(project_root);
     let file_path = Path.manifest_path(root_dir);
-    let content = read_text(file_path);
+    let content = read_manifest_text(file_path);
     if (content == null) {
-        throw "Failed to read manifest at " @ file_path;
+        panic("Failed to read manifest at " @ file_path);
     }
 
     let manifest = {
@@ -237,7 +242,7 @@ export func load_manifest(project_root) {
 
         let eq = find_unquoted_char(cleaned, "=");
         if (eq == -1) {
-            throw "Invalid manifest line: " @ cleaned;
+            panic("Invalid manifest line: " @ cleaned);
         }
 
         let key = unquote(cleaned.substr(0, eq).trim());
@@ -285,32 +290,32 @@ export func is_workspace_root(manifest) {
 
 export func validate_manifest(manifest, require_entry) {
     if (!manifest.has_key("packageFormat")) {
-        throw "Manifest is missing packageFormat";
+        panic("Manifest is missing packageFormat");
     }
     if (manifest.packageFormat != 1) {
-        throw "Unsupported packageFormat: " @ manifest.packageFormat;
+        panic("Unsupported packageFormat: " @ manifest.packageFormat);
     }
 
     let virtual_root = is_workspace_root(manifest) && !has_package(manifest);
 
     if (!virtual_root) {
         if (!manifest.has_key("name") || manifest.name == "") {
-            throw "Manifest is missing name";
+            panic("Manifest is missing name");
         }
         let name = manifest.name;
         let i = 0;
         while (i < name.length()) {
             let code = name.char_code_at(i);
             if (code < 33 || code > 126) {
-                throw "Manifest name may only contain printable ASCII characters: " @ name;
+                panic("Manifest name may only contain printable ASCII characters: " @ name);
             }
             i++;
         }
         if (!manifest.has_key("version") || manifest.version == "") {
-            throw "Manifest is missing version";
+            panic("Manifest is missing version");
         }
         if (require_entry && (!manifest.has_key("entry") || manifest.entry == "")) {
-            throw "Root manifest is missing entry";
+            panic("Root manifest is missing entry");
         }
     }
 
@@ -320,14 +325,68 @@ export func validate_manifest(manifest, require_entry) {
         let has_path = spec.has_key("path");
         let has_version = spec.has_key("version");
         if (has_path && has_version) {
-            throw "Dependency '" @ dependency_name @ "' cannot specify both path and version";
+            panic("Dependency '" @ dependency_name @ "' cannot specify both path and version");
         }
         if (!has_path && !has_version) {
-            throw "Dependency '" @ dependency_name @ "' must specify either path or version";
+            panic("Dependency '" @ dependency_name @ "' must specify either path or version");
         }
     }
 }
 
 export func manifest_identity(manifest) {
     return manifest.name @ "@" @ manifest.version;
+}
+
+export func render_manifest(manifest) {
+    let lines = [];
+    lines.push("packageFormat = " @ manifest["packageFormat"]);
+    lines.push("name = " @ quote_string(manifest["name"]));
+    lines.push("version = " @ quote_string(manifest["version"]));
+    if (manifest.has_key("entry") && manifest["entry"] != null && manifest["entry"] != "") {
+        lines.push("entry = " @ quote_string(manifest["entry"]));
+    }
+    if (manifest.has_key("registries") && manifest["registries"] != null) {
+        let regs = manifest["registries"];
+        if (regs.length() > 0) {
+            let reg_items = [];
+            for (r in regs) {
+                reg_items.push(quote_string(r));
+            }
+            lines.push("registries = [" @ reg_items.join(", ") @ "]");
+        }
+    }
+    let dep_names = manifest["dependencies"].keys();
+    dep_names.sort();
+    if (dep_names.length() > 0) {
+        lines.push("");
+        lines.push("[dependencies]");
+        for (dep_name in dep_names) {
+            let spec = manifest["dependencies"][dep_name];
+            let spec_parts = [];
+            if (spec.has_key("version")) {
+                spec_parts.push("version = " @ spec["version"]);
+            } else if (spec.has_key("path")) {
+                spec_parts.push("path = " @ quote_string(spec["path"]));
+            }
+            lines.push(quote_string(dep_name) @ " = { " @ spec_parts.join(", ") @ " }");
+        }
+    }
+    return lines.join("\n") @ "\n";
+}
+
+export func resolve_registry_url(override_url, manifest) {
+    let registry_url = override_url;
+    if (registry_url == null || registry_url == "") {
+        registry_url = load_saved_registry();
+    }
+    if ((registry_url == null || registry_url == "") && manifest != null) {
+        let regs = manifest.has_key("registries") ? manifest["registries"] : [];
+        if (regs.length() > 0) {
+            registry_url = regs[0];
+        }
+    }
+    if (registry_url == null || registry_url == "") {
+        registry_url = "https://npkg.org/";
+    }
+    return normalize_registry_api_url(registry_url);
 }

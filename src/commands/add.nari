@@ -1,0 +1,35 @@
+import FileUtils from "../../lib/file_utils.nari";
+import Path from "../../lib/path_utils.nari";
+import Manifest from "../../lib/manifest.nari";
+import PackageSpec from "../../lib/package_spec.nari";
+import Store from "../../lib/store.nari";
+import { command_install } from "./install.nari";
+
+export func command_add(args) {
+    let project_dir = ".";
+    let pkg_spec = null;
+
+    if (args.length() == 2) {
+        pkg_spec = args[1];
+    } else if (args.length() >= 3) {
+        project_dir = args[1];
+        pkg_spec = args[2];
+    } else {
+        panic("Usage: npkg add [project_dir] <name[@version|@latest]>");
+    }
+
+    project_dir = Path.normalize_path(project_dir);
+
+    let manifest = Manifest.load_manifest(project_dir);
+    let parsed_spec = PackageSpec.parse_package_spec(pkg_spec);
+    let pkg_name = parsed_spec["name"];
+    let pkg_version = Store.query_latest_version(pkg_name, parsed_spec["requirement"], manifest["registries"]);
+    manifest["dependencies"][pkg_name] = { version: pkg_version };
+
+    let manifest_path = Path.join_path(project_dir, "nari.toml");
+    FileUtils.write_text(manifest_path, Manifest.render_manifest(manifest));
+    print(`Added {pkg_name}@{pkg_version} to {manifest_path}`);
+
+    let install_args = ["install", project_dir];
+    command_install(install_args);
+}

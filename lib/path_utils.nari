@@ -123,7 +123,7 @@ export func find_nearest_manifest(start_dir) {
 
     while (true) {
         let candidate = manifest_path(current);
-        if (await fs.fileExists(candidate)) {
+        if (fs.file_exists(candidate).await) {
             return current;
         }
         let parent = dirname(current);
@@ -175,13 +175,17 @@ func segment_matches(segment, pattern) {
     return true;
 }
 
+export func looks_like_path(s) {
+    return s == "." || s == ".." || s.starts_with("/") || s.starts_with("./") || s.starts_with("../") || s.starts_with("~");
+}
+
 // Expand one workspace member glob (e.g. "packages/*") relative to `root_dir`
 // into a list of absolute member directories that contain a nari.toml.
 export func expand_member_pattern(root_dir, pattern) {
     let normalized = normalize_path(pattern);
     if (normalized.index_of("*") == -1) {
         let dir = normalize_path(join_path(root_dir, normalized));
-        if (fs.is_directory(dir) && await fs.file_exists(manifest_path(dir))) {
+        if (fs.is_directory(dir) && fs.file_exists(manifest_path(dir)).await) {
             return [dir];
         }
         return [];
@@ -197,8 +201,9 @@ export func expand_member_pattern(root_dir, pattern) {
                 next.push(join_path(current, segment));
                 continue;
             }
-            let entries = await fs.list_dir(current);
-            if (entries == null) { continue; }
+            let entries_result = fs.list_dir(current).await;
+            if (entries_result.is_err()) { continue; }
+            let entries = entries_result.unwrap();
             entries.sort();
             for (name in entries) {
                 if (name.starts_with(".")) { continue; }
@@ -212,7 +217,7 @@ export func expand_member_pattern(root_dir, pattern) {
 
     let results = [];
     for (dir in frontier) {
-        if (fs.is_directory(dir) && await fs.file_exists(manifest_path(dir))) {
+        if (fs.is_directory(dir) && fs.file_exists(manifest_path(dir)).await) {
             results.push(normalize_path(dir));
         }
     }

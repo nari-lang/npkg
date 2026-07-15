@@ -1,12 +1,14 @@
 import Semver from "./semver.nari";
+import { npkg_credentials_path } from "./storage.nari";
 
 func read_registry_text(url) {
-    let response = await http.fetch(url);
-    if (response == null) {
-        throw "Registry request failed for " @ url;
+    let response_result = http.fetch(url).await;
+    if (response_result.is_err()) {
+        panic("Registry request failed for " @ url @ ": " @ response_result.unwrap_err());
     }
+    let response = response_result.unwrap();
     if (response.status_code < 200 || response.status_code >= 300) {
-        throw "Registry request failed for " @ url @ " with HTTP status " @ response.status_code;
+        panic("Registry request failed for " @ url @ " with HTTP status " @ response.status_code);
     }
     return response.body;
 }
@@ -156,7 +158,7 @@ func parse_package_section(section_name) {
     let parts = [];
     let i = 0;
     while (i < rest.length()) {
-        if (rest.charAt(i) == ".") {
+        if (rest.char_at(i) == ".") {
             i++;
             continue;
         }
@@ -194,6 +196,43 @@ func normalize_base_url(url) {
     }
     return url;
 }
+
+export func load_saved_registry() {
+    let registry_url = platform.getenv("NPKG_REGISTRY");
+    if (registry_url != null && registry_url != "") { return registry_url; }
+    let creds_path = npkg_credentials_path();
+    if (!creds_path || !fs.file_exists(creds_path).await) { return null; }
+    let text_result = fs.read_file(creds_path).await;
+    if (text_result.is_err()) { return null; }
+    let text = text_result.unwrap();
+    let lines = text.split("\n");
+    for (line in lines) {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("NPKG_REGISTRY=")) {
+            return trimmed.substr(14, trimmed.length());
+        }
+    }
+    return null;
+}
+
+export func normalize_registry_api_url(registry_url) {
+    if (registry_url == null || registry_url == "") {
+        return null;
+    }
+    let url = registry_url.trim();
+    if (url.ends_with("/registry/index.toml")) {
+        url = url.substr(0, url.length() - 20);
+    } else if (url.ends_with("/index.toml")) {
+        url = url.substr(0, url.length() - 11);
+    } else if (url.ends_with("/registry")) {
+        url = url.substr(0, url.length() - 9);
+    }
+    if (url.ends_with("/")) {
+        url = url.substr(0, url.length() - 1);
+    }
+    return url;
+}
+
 
 export func load_registry(registry_url) {
     let content = read_registry_text(registry_url);
@@ -234,7 +273,7 @@ export func load_registry(registry_url) {
 
         let eq = find_unquoted_char(cleaned, "=");
         if (eq == -1) {
-            throw "Invalid registry line: " @ cleaned;
+            panic("Invalid registry line: " @ cleaned);
         }
 
         let key = unquote(cleaned.substr(0, eq).trim());
@@ -248,10 +287,10 @@ export func load_registry(registry_url) {
     }
 
     if (!registry.has_key("registryVersion")) {
-        throw "Registry " @ registry_url @ " is missing registryVersion";
+        panic("Registry " @ registry_url @ " is missing registryVersion");
     }
     if (registry.registryVersion != 1) {
-        throw "Unsupported registryVersion " @ registry.registryVersion @ " in " @ registry_url;
+        panic("Unsupported registryVersion " @ registry.registryVersion @ " in " @ registry_url);
     }
 
     return registry;
@@ -259,10 +298,10 @@ export func load_registry(registry_url) {
 
 func validate_entry(entry, package_name, version, registry_url) {
     if (!entry.has_key("url") || entry["url"] == "") {
-        throw "Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing url";
+        panic("Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing url");
     }
     if (!entry.has_key("integrity") || entry["integrity"] == "") {
-        throw "Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing integrity";
+        panic("Registry entry for " @ package_name @ "@" @ version @ " in " @ registry_url @ " is missing integrity");
     }
     entry.archiveUrl = entry["url"];
 }
@@ -308,4 +347,21 @@ export func find_satisfying_version(registry_url, package_name, requirement) {
     let entry = versions[best_version];
     validate_entry(entry, package_name, best_version, registry_url);
     return entry;
+}
+
+export func resolve_registry_url(override_url, manifest) {
+    let registry_url = override_url;
+    if (registry_url == null || registry_url == "") {
+        registry_url = load_saved_registry();
+    }
+    if ((registry_url == null || registry_url == "") && manifest != null) {
+        let regs = manifest.has_key("registries") ? manifest["registries"] : [];
+        if (regs.length() > 0) {
+            registry_url = regs[0];
+        }
+    }
+    if (registry_url == null || registry_url == "") {
+        registry_url = "https://npkg.org/";
+    }
+    return normalize_registry_api_url(registry_url);
 }

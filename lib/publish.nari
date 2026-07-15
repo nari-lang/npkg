@@ -1,6 +1,15 @@
-import Path from "./path_utils.nari";
-import { Hash } from "std/hash";
 import { Archive } from "std/archive";
+import { Hash } from "std/hash";
+import Path from "./path_utils.nari";
+import ShellUtils from "./shell_utils.nari";
+import { url_encode_component } from "./url_utils.nari";
+import { rewrite_manifest_for_publish } from "./utils.nari";
+
+export func _short_hash(h) {
+    if (h == null || h == "") { return "?"; }
+    if (h.length() <= 16) { return h; }
+    return h.substr(0, 16) + "...";
+}
 
 // Returns true if `c` is in [a-z0-9._-]
 func _is_segment_byte(c) {
@@ -33,23 +42,23 @@ func _valid_segment(s) {
 // length cap of 128
 export func validate_package_name(name) {
     if (name == null || name == "" || name.length() > 128) {
-        throw "Invalid package name (must be 1-128 chars): '" @ name @ "'";
+        panic("Invalid package name (must be 1-128 chars): '" @ name @ "'");
     }
     if (name.starts_with("@")) {
         let slash = name.index_of("/");
         if (slash <= 1 || slash == name.length() - 1) {
-            throw "Invalid scoped package name (expected '@scope/name'): '" @ name @ "'";
+            panic("Invalid scoped package name (expected '@scope/name'): '" @ name @ "'");
         }
         let scope = name.substr(1, slash - 1);
         let segment = name.substr(slash + 1, name.length() - slash - 1);
         if (!_valid_segment(scope) || !_valid_segment(segment)) {
-            throw "Scoped package name must match @<scope>/<name> with lowercase " @
-                "alphanumerics, '.', '_', '-' (boundaries alphanumeric): '" @ name @ "'";
+            panic("Scoped package name must match @<scope>/<name> with lowercase " @
+                "alphanumerics, '.', '_', '-' (boundaries alphanumeric): '" @ name @ "'");
         }
         return;
     }
     if (!_valid_segment(name)) {
-        throw "Package name must be lowercase alphanumerics, '.', '_', '-' " @ "(boundaries alphanumeric): '" @ name @ "'";
+        panic("Package name must be lowercase alphanumerics, '.', '_', '-' " @ "(boundaries alphanumeric): '" @ name @ "'");
     }
 }
 
@@ -65,21 +74,21 @@ func _is_version_byte(char) {
 
 export func validate_version_string(v) {
     if (v == null || v == "" || v.length() > 64) {
-        throw "Invalid version (must be 1-64 chars): '" @ v @ "'";
+        panic("Invalid version (must be 1-64 chars): '" @ v @ "'");
     }
     if (v == "." || v == "..") {
-        throw "Invalid version (reserved): '" @ v @ "'";
+        panic("Invalid version (reserved): '" @ v @ "'");
     }
     if (v.starts_with(".")) {
-        throw "Invalid version (leading dot not allowed): '" @ v @ "'";
+        panic("Invalid version (leading dot not allowed): '" @ v @ "'");
     }
     if (v.index_of("/") != -1 || v.index_of("\\") != -1) {
-        throw "Invalid version (path separators not allowed): '" @ v @ "'";
+        panic("Invalid version (path separators not allowed): '" @ v @ "'");
     }
     let i = 0;
     while (i < v.length()) {
         if (!_is_version_byte(v.char_code_at(i))) {
-            throw "Invalid version (allowed chars: 0-9 A-Z a-z . + _ -): '" @ v @ "'";
+            panic("Invalid version (allowed chars: 0-9 A-Z a-z . + _ -): '" @ v @ "'");
         }
         i++;
     }
@@ -97,7 +106,7 @@ export func warn_recommended_fields(manifest, project_dir, warn) {
     let readme_candidates = ["README.md", "README", "readme.md", "readme"];
     let has_readme = false;
     for (cand in readme_candidates) {
-        if (await fs.fileExists(Path.join_path(project_dir, cand))) {
+        if (fs.file_exists(Path.join_path(project_dir, cand)).await) {
             has_readme = true;
         }
     }
@@ -125,14 +134,14 @@ func _git_porcelain(project_dir) {
     let cmd = "git -C " @ escaped @ " status --porcelain > " @ probe_escaped @ " 2>/dev/null";
     let code = system.exec(cmd);
     if (code != 0) {
-        if (await fs.file_exists(probe_path)) { await fs.delete_file(probe_path); }
+        if (fs.file_exists(probe_path).await) { fs.delete_file(probe_path).await.unwrap(); }
         return null;
     }
     let body = "";
-    if (await fs.file_exists(probe_path)) {
-        body = await fs.read_file(probe_path);
+    if (fs.file_exists(probe_path).await) {
+        body = fs.read_file(probe_path).await.unwrap();
         if (body == null) { body = ""; }
-        await fs.delete_file(probe_path);
+        fs.delete_file(probe_path).await.unwrap();
     }
     return body;
 }
@@ -244,15 +253,15 @@ export func load_ignore_patterns(project_dir) {
     for (p in _parse_ignore_file(_DEFAULT_IGNORES.join("\n"))) { all.push(p); }
 
     let gi = Path.join_path(project_dir, ".gitignore");
-    if (await fs.fileExists(gi)) {
-        let text = await fs.readFile(gi);
+    if (fs.file_exists(gi).await) {
+        let text = fs.read_file(gi).await.unwrap();
         if (text != null) {
             for (p in _parse_ignore_file(text)) { all.push(p); }
         }
     }
     let ni = Path.join_path(project_dir, ".npkgignore");
-    if (await fs.fileExists(ni)) {
-        let text = await fs.readFile(ni);
+    if (fs.file_exists(ni).await) {
+        let text = fs.read_file(ni).await.unwrap();
         if (text != null) {
             for (p in _parse_ignore_file(text)) { all.push(p); }
         }
@@ -353,7 +362,7 @@ export func walk_files_for_archive(root, patterns) {
     let stack = [{abs: root, rel: ""}];
     while (stack.length() > 0) {
         let cur = stack.pop();
-        let names = await fs.list_dir(cur["abs"]);
+        let names = fs.list_dir(cur["abs"]).await.unwrap();
         if (names == null) { continue; }
         names.sort();
         for (name in names) {
@@ -378,11 +387,11 @@ export func walk_files_for_archive(root, patterns) {
 // Returns an object with size + checksum + a human-readable size string.
 export func archive_report(archive_path) {
     let size = 0;
-    let listing = Archive.list(archive_path);
+    let listing = Archive.list(archive_path).unwrap();
     let count = listing.length();
     // libarchive doesn't tell us compressed size; stat the file via fs.
     // We rely on `archive_path` existing - caller just created it.
-    let body = await fs.read_file(archive_path);
+    let body = fs.read_file(archive_path).await.unwrap();
     if (body != null) { size = body.length(); }
 
     let checksum = Hash.sha256_file(archive_path);
@@ -416,13 +425,9 @@ func _round1(f) {
 export func remote_version_exists(registry_url, pkg_name, version) {
     let encoded = pkg_name.replace_all("/", "%2F").replace_all("@", "%40");
     let url = registry_url @ "/api/packages/" @ encoded @ "/versions/" @ version;
-    let resp = null;
-    try {
-        resp = await http.fetch(url);
-    } catch (e) {
-        return false;
-    }
-    if (resp == null) { return false; }
+    let resp_result = http.fetch(url).await;
+    if (resp_result.is_err()) { return false; }
+    let resp = resp_result.unwrap();
     return resp.status_code == 200;
 }
 
@@ -433,16 +438,15 @@ export func parse_upload_response(body_text) {
     if (body_text == null || body_text == "") {
         return {ok: false, error_message: "empty response from registry", integrity: null};
     }
-    let parsed = null;
-    try {
-        parsed = JSON.parse(body_text);
-    } catch (e) {
+    let parsed_result = JSON.parse(body_text);
+    if (parsed_result.is_err()) {
         return {
             ok: false,
             error_message: "non-JSON response from registry: " @ _truncate(body_text, 200),
             integrity: null
         };
     }
+    let parsed = parsed_result.unwrap();
     if (parsed == null || typeof(parsed) != "object") {
         return {
             ok: false,
@@ -475,9 +479,9 @@ let _MAX_ARCHIVE_BYTES = 63 * 1048576;
 
 export func enforce_archive_size(bytes, pkg_name) {
     if (bytes > _MAX_ARCHIVE_BYTES) {
-        throw "Archive for " @ pkg_name @ " is " @ _format_bytes(bytes) @
+        panic("Archive for " @ pkg_name @ " is " @ _format_bytes(bytes) @
             " which exceeds the registry limit (" @ _format_bytes(_MAX_ARCHIVE_BYTES) @
-            "). Add large files to .npkgignore or split the package.";
+            "). Add large files to .npkgignore or split the package.");
     }
 }
 
@@ -506,17 +510,16 @@ export func make_multipart(boundary, text_fields, file_field, file_name, file_by
 
 // POST the package archive to the registry.
 // Returns the registry response body text on success.
-// Throws on transport failure or non-2xx response with the server's error message
 export func upload_archive(registry_url, encoded_pkg_name, version, token, archive_path) {
-    let bytes = await fs.read_file(archive_path);
+    let bytes = fs.read_file(archive_path).await.unwrap();
     if (bytes == null) {
-        throw "Failed to read archive at " @ archive_path;
+        panic("Failed to read archive at " @ archive_path);
     }
 
     let boundary = "----nari-npkg-" @ ("" @ time()).replace_all(".", "-") @ "-" @ bytes.length();
 
     // declare the archive checksum so the server can verify the upload arrived intact.
-    let declared_integrity = "sha256-" @ Hash.sha256File(archive_path);
+    let declared_integrity = "sha256-" @ Hash.sha256_file(archive_path);
     let body = make_multipart(
         boundary,
         [["version", version], ["integrity", declared_integrity]],
@@ -526,9 +529,7 @@ export func upload_archive(registry_url, encoded_pkg_name, version, token, archi
     );
 
     let url = registry_url @ "/api/packages/" @ encoded_pkg_name @ "/versions";
-    let resp = null;
-    try {
-        resp = await http.fetch(url, {
+    let resp_result = http.fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " @ token,
@@ -536,46 +537,40 @@ export func upload_archive(registry_url, encoded_pkg_name, version, token, archi
                 "Accept": "application/json"
             },
             body: body
-        });
-    } catch (err) {
-        throw "Failed to reach registry at " @ registry_url @ ": " @ err;
+        }).await;
+    if (resp_result.is_err()) {
+        return Err("Failed to reach registry at " @ registry_url @ ": " @ resp_result.unwrap_err());
     }
-
-    if (resp == null) {
-        throw "Failed to connect to registry at " @ registry_url;
-    }
+    let resp = resp_result.unwrap();
 
     if (resp.status_code >= 200 && resp.status_code < 300) {
-        return resp.body;
+        return Ok(resp.body);
     }
 
     let body_text = resp.body;
     if (body_text == null) { body_text = ""; }
-    throw "Registry rejected upload (HTTP " @ resp.status_code @ "): " @ body_text;
+    return Err("Registry rejected upload (HTTP " @ resp.status_code @ "): " @ JSON.parse(body_text).unwrap().error);
 }
 
 // Create the package row before the first version upload. Tolerates a 409
-// from a race with another publisher (already exists). Throws on any other
+// from a race with another publisher (already exists). Panics on any other
 // non-2xx so the caller doesn't silently barrel into an upload that the
 // server will reject for a different reason.
 export func ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, token) {
     let check_url = registry_url + "/api/packages/" + encoded_pkg_name;
-    let check_resp = null;
-    try {
-        check_resp = await http.fetch(check_url);
-    } catch (e) {
+    let check_result = http.fetch(check_url).await;
+    if (check_result.is_err()) {
         // treat transport failures as "unknown"
         return;
     }
-    if (check_resp != null && check_resp.status_code == 200) {
+    let check_resp = check_result.unwrap();
+    if (check_resp.status_code == 200) {
         return;
     }
 
     print("  Package does not exist yet! Creating ...");
     let body = "{\"name\":\"" @ pkg_name @ "\",\"description\":\"\"}";
-    let create_resp = null;
-    try {
-        create_resp = await http.fetch(registry_url + "/api/packages", {
+    let create_result = http.fetch(registry_url + "/api/packages", {
             method: "POST",
             headers: {
                 "Authorization": "Bearer " @ token,
@@ -583,18 +578,141 @@ export func ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, toke
                 "Accept": "application/json"
             },
             body: body
-        });
-    } catch (err) {
-        throw "Failed to reach registry at " @ registry_url @ ": " @ err;
+        }).await;
+    if (create_result.is_err()) {
+        panic("Failed to reach registry at " @ registry_url @ ": " @ create_result.unwrap_err());
     }
-    if (create_resp == null) {
-        throw "Failed to connect to registry at " @ registry_url;
-    }
+    let create_resp = create_result.unwrap();
     let sc = create_resp.status_code;
     if (sc >= 200 && sc < 300) { return; }
     // 409 = already exists (race with concurrent publisher) -> tolerate.
     if (sc == 409) { return; }
     let body_text = create_resp.body;
     if (body_text == null) { body_text = ""; }
-    throw "Failed to create package " @ pkg_name @ " (HTTP " @ sc @ "): " @ body_text;
+    panic("Failed to create package " @ pkg_name @ " (HTTP " @ sc @ "): " @ body_text);
+}
+
+func publish_warn(msg) { print("  warning: " + msg); }
+export func publish_one_manifest(manifest, project_dir, registry_url, token, version_overrides, dry_run, allow_dirty) {
+    let pkg_name = manifest["name"];
+    let encoded_pkg_name = url_encode_component(pkg_name);
+    let safe_pkg_name = pkg_name.replace_all("/", "-").replace_all("@", "");
+    let version = manifest["version"];
+
+    let dry_prefix = "";
+    if (dry_run) { dry_prefix = "(dry-run) "; }
+
+    print(dry_prefix + "Publishing " + pkg_name + "@" + version + " to " + registry_url + " ...");
+
+    validate_package_name(pkg_name);
+    validate_version_string(version);
+
+    let git_state = detect_git_state(project_dir);
+    if (git_state == "dirty") {
+        if (allow_dirty) {
+            publish_warn("project has uncommitted changes (continuing because --allow-dirty was given)");
+        } else {
+            let dirty_summary = summarize_dirty_files(project_dir, 5);
+            let msg = "Refusing to publish " + pkg_name + "@" + version +
+                ": project has uncommitted changes. Commit or pass --allow-dirty.";
+            if (dirty_summary != "") {
+                msg = msg + "\n  Uncommitted files:\n" + dirty_summary;
+            }
+            panic(msg);
+        }
+    }
+
+    warn_recommended_fields(manifest, project_dir, publish_warn);
+
+    // Preflight: does the version already exist? If yes, no point archiving.
+    // We skip on dry runs so users can rehearse a re-publish locally.
+    if (!dry_run && remote_version_exists(registry_url, pkg_name, version)) {
+        panic("Version " + pkg_name + "@" + version + " already exists on " + registry_url);
+    }
+
+    let home = platform.getenv("HOME");
+    let tmp_dir = Path.join_path(home, ".nari/cache/npkg-publish/" + safe_pkg_name + "-" + version);
+    let archive_path = Path.join_path(tmp_dir, "package.tar.gz");
+
+    if (fs.file_exists(tmp_dir).await) {
+        system.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
+    }
+    fs.mkdir_all(tmp_dir);
+
+    // Build the file list directly from the source tree, filtered by the ignore rules.
+    let ignore_patterns = load_ignore_patterns(project_dir);
+    let entries = walk_files_for_archive(project_dir, ignore_patterns);
+    if (entries.length() == 0) {
+        panic("Refusing to publish " + pkg_name + ": no files would be included (all paths matched ignore rules?)");
+    }
+
+    if (version_overrides != null && version_overrides.keys().length() > 0) {
+        let orig_manifest_path = Path.join_path(project_dir, "nari.toml");
+        let original = fs.read_file(orig_manifest_path).await.unwrap();
+        if (original == null) {
+            panic("Could not read manifest at " + orig_manifest_path);
+        }
+        let rewritten = rewrite_manifest_for_publish(original, version_overrides);
+        if (rewritten != original) {
+            let rewritten_path = Path.join_path(tmp_dir, "nari.toml.rewritten");
+            fs.write_file(rewritten_path, rewritten).await.unwrap();
+
+            let j = 0;
+            let swapped = false;
+            while (j < entries.length()) {
+                if (entries[j]["dest"] == "nari.toml") {
+                    entries[j] = {src: rewritten_path, dest: "nari.toml"};
+                    swapped = true;
+                }
+                j++;
+            }
+            if (!swapped) {
+                // if the manifest somehow got ignored or not found, add it explicitly
+                entries.push({src: rewritten_path, dest: "nari.toml"});
+            }
+            print("  Rewrote workspace deps to pinned versions");
+        }
+    }
+
+    print("  Creating archive (" + entries.length() + " files) ...");
+    Archive.create(archive_path, entries, {format: "tar.gz"}).unwrap();
+
+    let report = archive_report(archive_path);
+    print("  Archive: " + report["size_human"] + ", " + report["files"] + " files, sha256=" + _short_hash(report["sha256"]));
+    enforce_archive_size(report["bytes"], pkg_name);
+
+    if (dry_run) {
+        print("  Dry run: archive prepared at " + archive_path);
+        print("  Skipping registry upload.");
+        // Leave the archive on disk so the user can inspect it.
+        return;
+    }
+
+    // Ensure the package row exists (tolerates 409 from concurrent create).
+    ensure_package_exists(registry_url, pkg_name, encoded_pkg_name, token);
+
+    print("  Uploading version " + version + " ...");
+    let upload_result = upload_archive(
+        registry_url, encoded_pkg_name, version, token, archive_path
+    );
+
+    // Always clean the publish scratch directory, success or failure.
+    system.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
+
+    if (upload_result.is_err()) {
+        print("\nUpload failed for " + pkg_name + "@" + version + ": " + upload_result.unwrap_err());
+        panic("");
+    }
+    let response_text = upload_result.unwrap();
+
+    // Parse the registry response and fail loudly if it doesn't match the
+    // success shape. This catches HTML error pages, empty bodies, and
+    // jsonErr-shaped 4xx responses uniformly. (upload_archive only returns
+    // on 2xx, but the body shape itself can still be wrong.)
+    let parsed = parse_upload_response(response_text);
+    if (!parsed["ok"]) {
+        panic("Upload rejected by registry for " + pkg_name + "@" + version + ": " + parsed["error_message"]);
+    }
+
+    print("Done! Published " + pkg_name + "@" + version + " (integrity=" + _short_hash(parsed["integrity"]) + ").");
 }

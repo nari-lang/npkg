@@ -1,0 +1,9 @@
+import { Path } from "std/path";
+
+export func write_text(path, content) {
+    let parent = Path.dirname(path);
+    if (parent != "." && parent != "") {
+        fs.mkdir_all(parent);
+    }
+    return fs.write_file(path, content).await.unwrap();
+}

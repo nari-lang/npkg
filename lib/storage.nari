@@ -1,0 +1,56 @@
+import Path from "./path_utils.nari";
+import ShellUtils from "./shell_utils.nari";
+
+export func npkg_home_dir() {
+    let home = platform.getenv("HOME");
+    if (home == null) { return null; }
+    return Path.join_path(home, ".nari/npkg");
+}
+
+export func npkg_credentials_path() {
+    let dir = npkg_home_dir();
+    if (dir == null) { return null; }
+    return Path.join_path(dir, "credentials");
+}
+
+// restrict a credentials file to owner-only on POSIX platforms
+export func secure_credentials_path(path) {
+    if (platform.os == "windows") { return; }
+    let cmd = "chmod 600 " @ ShellUtils.shell_escape_publish(path) @ " 2>/dev/null";
+    let code = system.exec(cmd);
+    if (code != 0) {
+        // Don't abort -- the file is still usable, just permissive.
+        // Surface enough info for the user to fix it manually.
+        print("warning: failed to chmod 600 " @ path @ " (exit " @ code @ "); " @
+              "set restrictive permissions manually");
+    }
+}
+
+// tighten ~/.nari/npkg to owner-only access
+export func secure_credentials_dir(dir) {
+    if (platform.os == "windows") { return; }
+    let cmd = "chmod 700 " @ ShellUtils.shell_escape_publish(dir) @ " 2>/dev/null";
+    system.exec(cmd);
+}
+
+export func load_credentials() {
+    let token = platform.getenv("NPKG_TOKEN");
+    if (token != null && token != "") { return token; }
+    let creds_path = npkg_credentials_path();
+    if (!creds_path || !fs.file_exists(creds_path).await) {
+        return null;
+    }
+    secure_credentials_dir(npkg_home_dir());
+    secure_credentials_path(creds_path);
+    let text_result = fs.read_file(creds_path).await;
+    if (text_result.is_err()) { return null; }
+    let text = text_result.unwrap();
+    let lines = text.split("\n");
+    for (line in lines) {
+        let trimmed = line.trim();
+        if (trimmed.starts_with("NPKG_TOKEN=")) {
+            return trimmed.substr(11, trimmed.length());
+        }
+    }
+    return null;
+}

@@ -1,0 +1,122 @@
+import Storage from "../../lib/storage.nari";
+import URLUtils from "../../lib/url_utils.nari";
+import Registry from "../../lib/registry.nari";
+
+// Delete a package, or a single version of a package, from the registry
+export func command_unpublish(args) {
+    let pkg_name = null;
+    let version = null;
+    let registry_url = null;
+    let token = null;
+    let assume_yes = false;
+
+    let i = 1;
+    while (i < args.length()) {
+        let arg = args[i];
+        if (arg == "--version" || arg == "-v") {
+            i++;
+            if (i >= args.length()) { panic("--version requires a value"); }
+            version = args[i];
+        } else if (arg == "--registry" || arg == "-r") {
+            i++;
+            if (i >= args.length()) { panic("--registry requires a value"); }
+            registry_url = args[i];
+        } else if (arg == "--token" || arg == "-t") {
+            i++;
+            if (i >= args.length()) { panic("--token requires a value"); }
+            token = args[i];
+        } else if (arg == "--yes" || arg == "-y") {
+            assume_yes = true;
+        } else if (!arg.starts_with("-")) {
+            if (pkg_name != null) {
+                panic("Unexpected extra argument: " @ arg);
+            }
+            pkg_name = arg;
+        } else {
+            panic("Unknown flag: " @ arg);
+        }
+        i++;
+    }
+
+    if (pkg_name == null || pkg_name == "") {
+        panic("Usage: npkg unpublish <name> [--version <v>] [--registry <url>] [--yes]");
+    }
+
+    if (token == null) {
+        token = Storage.load_credentials();
+    }
+    if (token == null || token == "") {
+        panic("No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.");
+    }
+
+    registry_url = Registry.resolve_registry_url(registry_url, null);
+
+    // Confirmation: by default prompt the user; --yes skips
+    let target_desc;
+    if (version == null) {
+        target_desc = "package '" + pkg_name + "' (ALL versions)";
+    } else {
+        target_desc = "version " + version + " of '" + pkg_name + "'";
+    }
+
+    if (!assume_yes) {
+        print("About to permanently delete " + target_desc + " from " + registry_url + ".");
+        print("This cannot be undone.");
+        print("Continue? [y/N]");
+        // io.stdin.read_line returns null on EOF (e.g. piped or non-TTY input).
+        // Treat that as a refusal rather than a silent yes.
+        let answer = io.stdin.read_line();
+        if (answer == null) {
+            panic("Aborted: no response from stdin (use --yes to bypass the prompt).");
+        }
+        let trimmed = answer.trim().to_lower();
+        if (trimmed != "y" && trimmed != "yes") {
+            print("Aborted.");
+            return;
+        }
+    }
+
+    let path = "/api/packages/" + URLUtils.url_encode_component(pkg_name);
+    if (version != null) {
+        path = path + "/versions/" + URLUtils.url_encode_component(version);
+    }
+    let url = registry_url + path;
+
+    let resp_result = http.fetch(url, {
+            method: "DELETE",
+            headers: {
+                "Authorization": "Bearer " + token,
+                "Accept": "application/json"
+            }
+        }).await;
+    if (resp_result.is_err()) {
+        panic("Failed to reach registry at " + registry_url + ": " + resp_result.unwrap_err());
+    }
+    let resp = resp_result.unwrap();
+
+    if (resp.status_code >= 200 && resp.status_code < 300) {
+        print("Deleted " + target_desc + ".");
+        return;
+    }
+
+    // Try to surface the server-provided error message
+    let body_result = JSON.parse(resp.body);
+    let server_msg = null;
+    if (!body_result.is_err()) { server_msg = body_result.unwrap().error; }
+
+    if (server_msg == null || server_msg == "") {
+        if (resp.status_code == 401) {
+            server_msg = "unauthorized (token missing or invalid)";
+        } else if (resp.status_code == 403) {
+            server_msg = "forbidden (you do not own this package)";
+        } else if (resp.status_code == 404) {
+            server_msg = "not found";
+        } else if (resp.status_code == 409) {
+            server_msg = "conflict (package has dependents)";
+        } else {
+            server_msg = "registry returned status " + resp.status_code;
+        }
+    }
+
+    panic("Unpublish failed: " + server_msg);
+}

@@ -1,0 +1,130 @@
+#!/usr/bin/env nari
+import { command_init } from "./commands/init.nari";
+import { command_install } from "./commands/install.nari";
+import { command_add } from "./commands/add.nari";
+import { command_clean } from "./commands/clean.nari";
+import { command_list } from "./commands/list.nari";
+import { command_update } from "./commands/update.nari";
+import { command_publish } from "./commands/publish.nari";
+import { command_login } from "./commands/login.nari";
+import { command_search } from "./commands/search.nari";
+import { command_unpublish } from "./commands/unpublish.nari";
+import { command_owner } from "./commands/owner.nari";
+
+func cli_args() {
+    let args = [];
+    let i = 0;
+    if (process.argv.length() > 0) {
+        if (process.argv[0].ends_with(".nari") || process.argv[0].ends_with(".naric")) {
+            i = 1;
+        } else {
+            i = 2;
+        }
+    }
+    while (i < process.argv.length()) {
+        args.push(process.argv[i]);
+        i++;
+    }
+    return args;
+}
+
+func print_usage() {
+    print("npkg - Nari package manager");
+    print("Usage:");
+    print("  npkg init    [project_dir] [package_name] create a new project");
+    print("  npkg install [project_dir]                install all deps of a project");
+    print("  npkg install <pkg[@ver|@latest]> ...      add & install packages into .");
+    print("  npkg add     [project_dir] <name[@version|@latest]> add a dep and install");
+    print("  npkg update  [project_dir]                upgrade packages within constraints");
+    print("  npkg list    [project_dir]                show installed packages");
+    print("  npkg clean   [project_dir]                remove unused store entries");
+    print("  npkg publish [project_dir]                publish package to registry");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN)");
+    print("               --workspace                  publish every workspace member in topo order");
+    print("               --dry-run                    stage + archive, but skip upload");
+    print("               --allow-dirty                allow publishing with uncommitted git changes");
+    print("  npkg login   [--registry <url>]           log in and save credentials");
+    print("  npkg search  <query>                      search for packages on registry");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --page     <n>               page number (default: 1)");
+    print("  npkg unpublish <name>                     remove a package from the registry");
+    print("               --version  <v>               only delete this version (keep package)");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN)");
+    print("               --yes / -y                   skip the interactive y/N prompt");
+    print("  npkg owner ls  <name>                     list owners of a package");
+    print("  npkg owner add <name> <user>              grant <user> co-ownership of <name>");
+    print("  npkg owner rm  <name> <user>              remove <user> from owners of <name>");
+    print("               --registry <url>             registry base URL (optional override)");
+    print("               --token    <key>             API key (or set NPKG_TOKEN; add/rm only)");
+}
+
+func start() {
+    let args = cli_args();
+    if (args.length() == 0) {
+        print_usage();
+        return;
+    }
+
+    let command = args[0];
+
+    if (command == "init") {
+        command_init(args);
+        return;
+    }
+
+    if (command == "install") {
+        command_install(args);
+        return;
+    }
+
+    if (command == "add") {
+        command_add(args);
+        return;
+    }
+
+    if (command == "clean") {
+        command_clean(args);
+        return;
+    }
+
+    if (command == "list") {
+        command_list(args);
+        return;
+    }
+
+    if (command == "update") {
+        command_update(args);
+        return;
+    }
+
+    if (command == "publish") {
+        command_publish(args);
+        return;
+    }
+
+    if (command == "login") {
+        command_login(args);
+        return;
+    }
+
+    if (command == "search") {
+        command_search(args);
+        return;
+    }
+
+    if (command == "unpublish") {
+        command_unpublish(args);
+        return;
+    }
+
+    if (command == "owner") {
+        command_owner(args);
+        return;
+    }
+
+    print("Unknown command: " @ command);
+    print_usage();
+    process.exit(1);
+}
