@@ -41,7 +41,7 @@ func shell_escape(text) {
 }
 
 func run_shell(command, failure_message) {
-    let code = system.exec(command);
+    let code = process.exec(command);
     if (code != 0) {
         panic(failure_message @ " (exit code " @ code @ ")");
     }
@@ -51,7 +51,7 @@ func rm_rf(path) {
     if (path == null || path == "" || path == "." || path == "/") {
         panic("Refusing to delete unsafe path " @ path);
     }
-    system.exec("rm -rf " @ shell_escape(path));
+    process.exec("rm -rf " @ shell_escape(path));
 }
 
 func cache_root() {

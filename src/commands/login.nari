@@ -57,7 +57,7 @@ export func command_login(args) {
     print("  " @ login_url);
     print("");
     // Best-effort browser open
-    system.exec("xdg-open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || true");
+    process.exec("xdg-open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || open " @ ShellUtils.shell_escape_publish(login_url) @ " 2>/dev/null || true");
 
     // Poll until completed or timed out (max ~2 minutes, 2 s interval)
     print("Waiting for browser authorization (Ctrl-C to cancel)...");
@@ -67,7 +67,7 @@ export func command_login(args) {
     let api_key = null;
 
     while (polls < max_polls) {
-        system.exec("sleep 2");
+        process.exec("sleep 2");
         polls++;
 
         let resp_result = http.fetch(poll_url).await;

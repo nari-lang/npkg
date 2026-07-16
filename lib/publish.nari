@@ -132,7 +132,7 @@ func _git_porcelain(project_dir) {
     // 2>/dev/null suppresses both git's stderr and the > redirect's failure
     // noise if cache_dir somehow isn't writable.
     let cmd = "git -C " @ escaped @ " status --porcelain > " @ probe_escaped @ " 2>/dev/null";
-    let code = system.exec(cmd);
+    let code = process.exec(cmd);
     if (code != 0) {
         if (fs.file_exists(probe_path).await) { fs.delete_file(probe_path).await.unwrap(); }
         return null;
@@ -635,7 +635,7 @@ export func publish_one_manifest(manifest, project_dir, registry_url, token, ver
     let archive_path = Path.join_path(tmp_dir, "package.tar.gz");
 
     if (fs.file_exists(tmp_dir).await) {
-        system.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
+        process.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
     }
     fs.mkdir_all(tmp_dir);
 
@@ -697,7 +697,7 @@ export func publish_one_manifest(manifest, project_dir, registry_url, token, ver
     );
 
     // Always clean the publish scratch directory, success or failure.
-    system.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
+    process.exec("rm -rf " + ShellUtils.shell_escape_publish(tmp_dir));
 
     if (upload_result.is_err()) {
         print("\nUpload failed for " + pkg_name + "@" + version + ": " + upload_result.unwrap_err());

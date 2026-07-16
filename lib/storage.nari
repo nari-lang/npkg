@@ -17,7 +17,7 @@ export func npkg_credentials_path() {
 export func secure_credentials_path(path) {
     if (platform.os == "windows") { return; }
     let cmd = "chmod 600 " @ ShellUtils.shell_escape_publish(path) @ " 2>/dev/null";
-    let code = system.exec(cmd);
+    let code = process.exec(cmd);
     if (code != 0) {
         // Don't abort -- the file is still usable, just permissive.
         // Surface enough info for the user to fix it manually.
@@ -30,7 +30,7 @@ export func secure_credentials_path(path) {
 export func secure_credentials_dir(dir) {
     if (platform.os == "windows") { return; }
     let cmd = "chmod 700 " @ ShellUtils.shell_escape_publish(dir) @ " 2>/dev/null";
-    system.exec(cmd);
+    process.exec(cmd);
 }
 
 export func load_credentials() {

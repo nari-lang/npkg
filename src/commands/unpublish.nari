@@ -63,9 +63,9 @@ export func command_unpublish(args) {
         print("About to permanently delete " + target_desc + " from " + registry_url + ".");
         print("This cannot be undone.");
         print("Continue? [y/N]");
-        // io.stdin.read_line returns null on EOF (e.g. piped or non-TTY input).
+        // process.stdin.read_line returns null on EOF (e.g. piped or non-TTY input).
         // Treat that as a refusal rather than a silent yes.
-        let answer = io.stdin.read_line();
+        let answer = process.stdin.read_line();
         if (answer == null) {
             panic("Aborted: no response from stdin (use --yes to bypass the prompt).");
         }
