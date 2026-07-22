@@ -46,8 +46,8 @@ func print_manifest_tree(manifest, packages) {
     }
 }
 
-export func command_list(args) {
-    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
+export func command_list() {
+    let project_dir = ".";
 
     // search upward so `npkg list` works from any workspace member, not just the root.
     let workspace = Workspace.discover_from(project_dir);

@@ -4,24 +4,9 @@ import ShellUtils from "../../lib/shell_utils.nari";
 import Storage from "../../lib/storage.nari";
 import Registry from "../../lib/registry.nari";
 
-export func command_login(args) {
-    let registry_url = null;
-    let i = 1;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else {
-            panic("Unknown argument: " @ arg);
-        }
-        i++;
-    }
-
-    registry_url = Registry.resolve_registry_url(registry_url, null);
-
-    print(registry_url);
+export func command_login(opts) {
+    let registry_url = Registry.resolve_registry_url(opts.registry, null);
+    
     let session_result = http.fetch(registry_url + "/api/auth/cli-session", {
             method: "POST",
             headers: {

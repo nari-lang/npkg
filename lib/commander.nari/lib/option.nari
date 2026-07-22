@@ -1,0 +1,221 @@
+// option.nari - Command options.
+//
+// Port of commander.js lib/option.js. Holds the short/long flags, whether a
+// value is required/optional/variadic, defaults, env vars, conflicts, implies,
+// choices, and custom parsing. DualOptions tracks positive/negative option
+// pairs that share a single value.
+
+// Convert a kebab-case option name (e.g. "pizza-type") to a snake_case
+// attribute key (e.g. "pizza_type").
+func kebab_to_snake(str) {
+  return str.replace("-", "_");
+}
+
+// Split the short and long flag out of something like '-m, --mixed <value>'.
+func split_option_flags(flags) {
+  let short_flag = null;
+  let long_flag = null;
+
+  let is_short_flag = func(s) {
+    return s.length() == 2 && s.char_at(0) == "-" && s.char_at(1) != "-";
+  };
+  let is_long_flag = func(s) {
+    return s.length() >= 3 && s.starts_with("--") && s.char_at(2) != "-";
+  };
+
+  // Split on runs of spaces, commas, and pipes.
+  let raw_parts = [];
+  let cur = "";
+  for (let i = 0; i < flags.length(); i++) {
+    let c = flags.char_at(i);
+    if (c == " " || c == "," || c == "|") {
+      if (cur.length() > 0) { raw_parts.push(cur); }
+      cur = "";
+    } else {
+      cur = cur @ c;
+    }
+  }
+  if (cur.length() > 0) { raw_parts.push(cur); }
+
+  // Normal is short and/or long.
+  if (raw_parts.length() > 0 && is_short_flag(raw_parts[0])) { short_flag = raw_parts[0]; raw_parts = raw_parts.slice(1); }
+  if (raw_parts.length() > 0 && is_long_flag(raw_parts[0])) { long_flag = raw_parts[0]; raw_parts = raw_parts.slice(1); }
+  // Long then short. Rarely used but fine.
+  if (short_flag == null && raw_parts.length() > 0 && is_short_flag(raw_parts[0])) {
+    short_flag = raw_parts[0];
+    raw_parts = raw_parts.slice(1);
+  }
+  // Allow two long flags, like '--ws, --workspace'.
+  // This is the supported way to have a shortish option flag.
+  if (short_flag == null && raw_parts.length() > 0 && is_long_flag(raw_parts[0])) {
+    short_flag = long_flag;
+    long_flag = raw_parts[0];
+    raw_parts = raw_parts.slice(1);
+  }
+
+  // Check for unprocessed flag. Fail noisily rather than silently ignore.
+  if (raw_parts.length() > 0 && raw_parts[0].starts_with("-")) {
+    panic("option creation failed due to '" @ raw_parts[0] @ "' in option flags '" @ flags @ "'");
+  }
+  if (short_flag == null && long_flag == null) {
+    panic("option creation failed due to no flags found in '" @ flags @ "'");
+  }
+
+  return { short_flag: short_flag, long_flag: long_flag };
+}
+
+export func Option(flags, description) {
+  let desc = description ?? "";
+  let required = flags.includes("<");
+  let optional = flags.includes("[");
+  let variadic = false;
+  // variadic test ignores <value,...> et al which might be used to describe custom splitting of single argument
+  if (flags.ends_with("...>") || flags.ends_with("...]")) { variadic = true; }
+
+  let split = split_option_flags(flags);
+  let short = split.short_flag;
+  let long = split.long_flag;
+  let negate = false;
+  if (long != null && long.starts_with("--no-")) { negate = true; }
+
+  let opt = {
+    flags: flags,
+    description: desc,
+    required: required,
+    optional: optional,
+    variadic: variadic,
+    mandatory: false,
+    short: short,
+    long: long,
+    negate: negate,
+    default_value: null,
+    _has_default: false,
+    default_value_description: null,
+    preset_arg: null,
+    _has_preset: false,
+    env_var: null,
+    parse_arg: null,
+    hidden: false,
+    arg_choices: null,
+    conflicts_with: [],
+    implied: null,
+    help_group_heading: null
+  };
+
+  opt.name = func() {
+    if (opt.long != null) { return opt.long.substr(2); }
+    return opt.short.substr(1);
+  };
+
+  opt.attribute_name = func() {
+    if (opt.negate) {
+      let n = opt.name();
+      if (n.starts_with("no-")) { n = n.substr(3); }
+      return kebab_to_snake(n);
+    }
+    return kebab_to_snake(opt.name());
+  };
+
+  opt.default = func(value, d) {
+    opt.default_value = value;
+    opt._has_default = (value != null);
+    opt.default_value_description = d;
+    return opt;
+  };
+
+  opt.preset = func(arg) {
+    opt.preset_arg = arg;
+    opt._has_preset = true;
+    return opt;
+  };
+
+  opt.conflicts = func(names) {
+    if (is_array(names)) {
+      for (n in names) { opt.conflicts_with.push(n); }
+    } else {
+      opt.conflicts_with.push(names);
+    }
+    return opt;
+  };
+
+  opt.implies = func(implied_option_values) {
+    let new_implied = implied_option_values;
+    if (is_string(new_implied)) {
+      let o = {};
+      o[new_implied] = true;
+      new_implied = o;
+    }
+    if (opt.implied == null) { opt.implied = {}; }
+    let ks = new_implied.keys();
+    for (k in ks) { opt.implied[k] = new_implied[k]; }
+    return opt;
+  };
+
+  opt.env = func(name) { opt.env_var = name; return opt; };
+  opt.arg_parser = func(fn) { opt.parse_arg = fn; return opt; };
+  opt.make_option_mandatory = func(m) { opt.mandatory = (m == null) ? true : (m == true); return opt; };
+  opt.hide_help = func(hide) { opt.hidden = (hide == null) ? true : (hide == true); return opt; };
+
+  opt.choices = func(values) {
+    opt.arg_choices = values.slice(0);
+    return opt;
+  };
+
+  opt.help_group = func(heading) { opt.help_group_heading = heading; return opt; };
+  opt.is = func(arg) { return opt.short == arg || opt.long == arg; };
+  opt.is_boolean = func() {
+    return !opt.required && !opt.optional && !opt.negate;
+  };
+
+  opt._collect_value = func(value, previous) {
+    if (previous == opt.default_value || !is_array(previous)) {
+      return [value];
+    }
+    previous.push(value);
+    return previous;
+  };
+
+  return opt;
+}
+
+// Helper to make it easier to work with dual options, without changing the
+// existing implementation. Supports separate dual options for separate positive
+// and negative options, like `--build` and `--no-build`, which share a single
+// option value.
+export func dual_options(options) {
+  let positive_options = {};
+  let negative_options = {};
+  let dual_options = {};
+
+  for (option in options) {
+    let key = option.attribute_name();
+    if (option.negate) {
+      negative_options[key] = option;
+    } else {
+      positive_options[key] = option;
+    }
+  }
+  let neg_keys = negative_options.keys();
+  for (key in neg_keys) {
+    if (positive_options.has_key(key)) { dual_options[key] = true; }
+  }
+
+  let dual = {
+    positive_options: positive_options,
+    negative_options: negative_options,
+    dual_options: dual_options
+  };
+
+  // Did the value come from the option, and not from possible matching dual option?
+  dual.value_from_option = func(value, option) {
+    let option_key = option.attribute_name();
+    if (!dual.dual_options.has_key(option_key)) { return true; }
+    let neg_opt = dual.negative_options[option_key];
+    let preset = neg_opt._has_preset ? neg_opt.preset_arg : null;
+    let has_preset = neg_opt._has_preset;
+    let negative_value = has_preset ? preset : false;
+    return option.negate == (negative_value == value);
+  };
+
+  return dual;
+}

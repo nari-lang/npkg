@@ -1,0 +1,76 @@
+// argument.nari - Command arguments.
+//
+// Port of commander.js lib/argument.js. The default is that an argument is
+// required, indicated explicitly with <> around the name. Put [] around the
+// name for an optional argument. A trailing `...` makes it variadic.
+
+// Takes an argument and returns its human readable equivalent for help usage.
+
+export func human_readable_arg_name(arg) {
+  let name_output = arg.name() @ (arg.variadic == true ? "..." : "");
+  return (arg.required == true ? "<" @ name_output @ ">" : "[" @ name_output @ "]");
+}
+
+export func Argument(name, description) {
+  let desc = description ?? "";
+  let variadic = false;
+  let required = true;
+  let _name = name;
+
+  if (name.length() > 0 && name.char_at(0) == "<") {
+    required = true;
+    _name = name.substr(1, name.length() - 2);
+  } else if (name.length() > 0 && name.char_at(0) == "[") {
+    required = false;
+    _name = name.substr(1, name.length() - 2);
+  } else {
+    required = true;
+    _name = name;
+  }
+
+  if (_name.ends_with("...")) {
+    variadic = true;
+    _name = _name.substr(0, _name.length() - 3);
+  }
+
+  let arg = {
+    description: desc,
+    variadic: variadic,
+    parse_arg: null,
+    default_value: null,
+    _has_default: false,
+    default_value_description: null,
+    arg_choices: null,
+    required: required,
+    _name: _name
+  };
+
+  arg.name = func() { return arg._name; };
+
+  arg._collect_value = func(value, previous) {
+    if (previous == arg.default_value || !is_array(previous)) {
+      return [value];
+    }
+    previous.push(value);
+    return previous;
+  };
+
+  arg.default = func(value, d) {
+    arg.default_value = value;
+    arg._has_default = (value != null);
+    arg.default_value_description = d;
+    return arg;
+  };
+
+  arg.arg_parser = func(fn) { arg.parse_arg = fn; return arg; };
+
+  arg.choices = func(values) {
+    arg.arg_choices = values.slice(0);
+    return arg;
+  };
+
+  arg.arg_required = func() { arg.required = true; return arg; };
+  arg.arg_optional = func() { arg.required = false; return arg; };
+
+  return arg;
+}

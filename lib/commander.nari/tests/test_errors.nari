@@ -1,0 +1,61 @@
+import "../main.nari";
+
+func capture_errors(build, args) {
+  let p = build();
+  p.exit_override(func(err) {
+    print("  [exit code=" @ err.exit_code @ " code=" @ err.code @ "]");
+    print("  msg: " @ err.message);
+    return true;
+  });
+  p.parse(args, { from: "user" });
+}
+
+print("=== missing required option ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.required_option("-s, --size <size>", "size").action(func(options) { print("  action ran!"); });
+  return p;
+}, []);
+
+print("=== invalid choice ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.add_option(create_option("-d, --drink <drink>", "drink").choices(["coke", "pepsi"])).action(func(options) { print("  action ran!"); });
+  return p;
+}, ["-d", "water"]);
+
+print("=== unknown option ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.option("-v, --verbose").action(func(options) {});
+  return p;
+}, ["--verbosez"]);
+
+print("=== missing argument ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.argument("<file>", "input file").action(func(file) { print("  file:", file); });
+  return p;
+}, []);
+
+print("=== excess arguments ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.argument("<a>", "a").action(func(a) { print("  a:", a); });
+  return p;
+}, ["1", "2", "3"]);
+
+print("=== unknown command ===");
+capture_errors(func() {
+  let p = create_command("cli");
+  p.command("install").action(func() { print("  install"); });
+  p.command("list").action(func() { print("  list"); });
+  return p;
+}, ["instal"]);
+
+print("=== valid required option (should run action) ===");
+capture_errors(func() {
+  let p = create_command("test");
+  p.required_option("-s, --size <size>", "size").action(func(options) { print("  action ran, size:", options.size); });
+  return p;
+}, ["-s", "big"]);

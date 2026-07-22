@@ -79,7 +79,7 @@ export func topo_sort_workspace_members(members) {
     let order = [];
 
     let visit = null;
-    visit = export func(name) {
+    visit = func(name) {
         if (visited.has_key(name)) { return; }
         if (visiting.has_key(name)) {
             panic("Workspace dependency cycle detected at member " + name);

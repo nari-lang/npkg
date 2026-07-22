@@ -1,47 +1,9 @@
 import URLUtils from "../../lib/url_utils.nari";
 import Registry from "../../lib/registry.nari";
 
-export func command_search(args) {
-    let query = "";
-    let registry_url = null;
-    let page = 1;
-    let per_page = 20;
-
-    let i = 1;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else if (arg == "--page" || arg == "-p") {
-            i++;
-            if (i >= args.length()) { panic("--page requires a value"); }
-            page = args[i];
-        } else if (arg == "--per-page") {
-            i++;
-            if (i >= args.length()) { panic("--per-page requires a value"); }
-            per_page = args[i];
-        } else if (!arg.starts_with("-")) {
-            if (query == "") {
-                query = arg;
-            } else {
-                query = query @ " " @ arg;
-            }
-        } else {
-            panic("Unknown argument: " @ arg);
-        }
-        i++;
-    }
-
-    if (query == "") {
-        panic("Usage: npkg search <query> [--registry <url>] [--page <n>]");
-    }
-
-    registry_url = Registry.resolve_registry_url(registry_url, null);
-
-    let encoded_query = URLUtils.url_encode_component(query);
-    let url = registry_url + "/api/packages?q=" + encoded_query + "&page=" + page + "&per_page=" + per_page;
+export func command_search(query, opts) {
+    let registry_url = Registry.resolve_registry_url(opts.registry, null);
+    let url = registry_url + "/api/packages?q=" + URLUtils.url_encode_component(query) + "&page=" + opts.page + "&per_page=" + opts.per_page;
 
     let resp_result = http.fetch(url).await;
     if (resp_result.is_err()) {
@@ -89,9 +51,9 @@ export func command_search(args) {
 
     print("");
     // only add pages if there are more pages
-    let page_n = parse_int(page) ? parse_int(page) : 1;
+    let page_n = parse_int(opts.page) ? parse_int(opts.page) : 1;
     let total_n = parse_int(total) ? parse_int(total) : 0;
-    let per_page_n = parse_int(per_page) ? parse_int(per_page) : 20;
+    let per_page_n = parse_int(opts.perPage) ? parse_int(opts.perPage) : 20;
     let shown_so_far = (page_n - 1) * per_page_n + pkg_objects.length();
     print("Page " + page_n + ", showing " + pkg_objects.length() + " of " + total_n + " result(s).");
     if (shown_so_far < total_n) {

@@ -1,0 +1,448 @@
+// help.nari - Help text generation.
+//
+// Port of commander.js lib/help.js. Builds the Usage/Arguments/Options/Commands
+// help text. Methods are static-style on a single object so they can be
+// overridden via configure_help() or a subclass-like factory.
+
+import { human_readable_arg_name } from "argument.nari";
+
+// JSON.stringify returns a Result in current Nari builds; unwrap it.
+func json_stringify(val) {
+  let r = JSON.stringify(val);
+  if (is_object(r) && r.has_key("is_ok")) {
+    return r.unwrap_or(to_string(val));
+  }
+  return r;
+}
+
+// Display width of a string. Commander.js strips ANSI escapes here; Nari has
+// no colour escapes in the help output, so the width is just the length.
+func display_width(str) {
+  return str.length();
+}
+
+export func Help() {
+  let help = {
+    help_width: null,
+    min_width_to_wrap: 40,
+    sort_subcommands: false,
+    sort_options: false,
+    show_global_options: false
+  };
+
+  help.prepare_context = func(context_options) {
+    let ctx = context_options ?? {};
+    if (help.help_width == null) {
+      help.help_width = (ctx.help_width == null) ? 80 : ctx.help_width;
+    }
+  };
+
+  help.visible_commands = func(cmd) {
+    let visible = [];
+    for (c in cmd.commands) {
+      if (!c._hidden) { visible.push(c); }
+    }
+    let hc = cmd._get_help_command();
+    if (hc != null && !hc._hidden) { visible.push(hc); }
+    if (help.sort_subcommands) {
+      visible.sort(func(a, b) {
+        let an = a.name();
+        let bn = b.name();
+        return an < bn ? -1 : (an > bn ? 1 : 0);
+      });
+    }
+    return visible;
+  };
+
+  help.compare_options = func(a, b) {
+    let get_sort_key = func(option) {
+      if (option.short != null) { return option.short.substr(1); }
+      return option.long.substr(2);
+    };
+    let ka = get_sort_key(a);
+    let kb = get_sort_key(b);
+    return ka < kb ? -1 : (ka > kb ? 1 : 0);
+  };
+
+  help.visible_options = func(cmd) {
+    let visible = [];
+    for (o in cmd.options) {
+      if (!o.hidden) { visible.push(o); }
+    }
+    let help_option = cmd._get_help_option();
+    if (help_option != null && !help_option.hidden) {
+      let remove_short = help_option.short != null && cmd._find_option(help_option.short) != null;
+      let remove_long = help_option.long != null && cmd._find_option(help_option.long) != null;
+      if (!remove_short && !remove_long) {
+        visible.push(help_option);
+      } else if (help_option.long != null && !remove_long) {
+        visible.push(cmd.create_option(help_option.long, help_option.description));
+      } else if (help_option.short != null && !remove_short) {
+        visible.push(cmd.create_option(help_option.short, help_option.description));
+      }
+    }
+    if (help.sort_options) { visible.sort(help.compare_options); }
+    return visible;
+  };
+
+  help.visible_global_options = func(cmd) {
+    if (!help.show_global_options) { return []; }
+    let global_options = [];
+    let ancestor = cmd.parent;
+    while (ancestor != null) {
+      for (o in ancestor.options) {
+        if (!o.hidden) { global_options.push(o); }
+      }
+      ancestor = ancestor.parent;
+    }
+    if (help.sort_options) { global_options.sort(help.compare_options); }
+    return global_options;
+  };
+
+  help.visible_arguments = func(cmd) {
+    if (cmd._args_description != null) {
+      for (argument in cmd.registered_arguments) {
+        if (argument.description == "" && cmd._args_description.has_key(argument.name())) {
+          argument.description = cmd._args_description[argument.name()];
+        }
+      }
+    }
+    let has_desc = false;
+    for (argument in cmd.registered_arguments) {
+      if (argument.description != "") { has_desc = true; }
+    }
+    if (has_desc) { return cmd.registered_arguments; }
+    return [];
+  };
+
+  help.subcommand_term = func(cmd) {
+    let parts = [];
+    for (arg in cmd.registered_arguments) { parts.push(human_readable_arg_name(arg)); }
+    // Note: "" @ forces a fresh string so later concatenation never writes back
+    // to cmd._name (a Nari property-slot quirk with complex objects).
+    let term = "" @ cmd._name;
+    if (cmd.aliases_list.length() > 0) { term = term @ "|" @ cmd.aliases_list[0]; }
+    if (cmd.options.length() > 0) { term = term @ " [options]"; }
+    if (parts.length() > 0) { term = term @ " " @ parts.join(" "); }
+    return term;
+  };
+
+  help.option_term = func(option) { return option.flags; };
+  help.argument_term = func(argument) { return argument.name(); };
+
+  help.longest_subcommand_term_length = func(cmd) {
+    let max = 0;
+    for (command in help.visible_commands(cmd)) {
+      let w = display_width(help.subcommand_term(command));
+      if (w > max) { max = w; }
+    }
+    return max;
+  };
+
+  help.longest_option_term_length = func(cmd) {
+    let max = 0;
+    for (option in help.visible_options(cmd)) {
+      let w = display_width(option.flags);
+      if (w > max) { max = w; }
+    }
+    return max;
+  };
+
+  help.longest_global_option_term_length = func(cmd) {
+    let max = 0;
+    for (option in help.visible_global_options(cmd)) {
+      let w = display_width(option.flags);
+      if (w > max) { max = w; }
+    }
+    return max;
+  };
+
+  help.longest_argument_term_length = func(cmd) {
+    let max = 0;
+    for (argument in help.visible_arguments(cmd)) {
+      let w = display_width(argument.name());
+      if (w > max) { max = w; }
+    }
+    return max;
+  };
+
+  help.command_usage = func(cmd) {
+    let cmd_name = "" @ cmd._name;
+    if (cmd.aliases_list.length() > 0) { cmd_name = cmd_name @ "|" @ cmd.aliases_list[0]; }
+    let ancestor_names = "";
+    let ancestor = cmd.parent;
+    while (ancestor != null) {
+      ancestor_names = "" @ ancestor.name() @ " " @ ancestor_names;
+      ancestor = ancestor.parent;
+    }
+    return ancestor_names @ cmd_name @ " " @ cmd.usage();
+  };
+
+  help.command_description = func(cmd) { return cmd.description(); };
+  help.subcommand_description = func(cmd) {
+    let s = cmd.summary();
+    if (s != "") { return s; }
+    return cmd.description();
+  };
+
+  help.option_description = func(option) {
+    let extra_info = [];
+    if (option.arg_choices != null) {
+      let quoted = [];
+      for (c in option.arg_choices) { quoted.push(json_stringify(c)); }
+      extra_info.push("choices: " @ quoted.join(", "));
+    }
+    if (option._has_default) {
+      let show_default = option.required || option.optional || (option.is_boolean() && is_bool(option.default_value));
+      if (show_default) {
+        let d = option.default_value_description;
+        if (d == null) { d = json_stringify(option.default_value); }
+        extra_info.push("default: " @ d);
+      }
+    }
+    if (option._has_preset && option.optional) {
+      extra_info.push("preset: " @ json_stringify(option.preset_arg));
+    }
+    if (option.env_var != null) {
+      extra_info.push("env: " @ option.env_var);
+    }
+    if (extra_info.length() > 0) {
+      let extra = "(" @ extra_info.join(", ") @ ")";
+      if (option.description != "") { return option.description @ " " @ extra; }
+      return extra;
+    }
+    return option.description;
+  };
+
+  help.argument_description = func(argument) {
+    let extra_info = [];
+    if (argument.arg_choices != null) {
+      let quoted = [];
+      for (c in argument.arg_choices) { quoted.push(json_stringify(c)); }
+      extra_info.push("choices: " @ quoted.join(", "));
+    }
+    if (argument._has_default) {
+      let d = argument.default_value_description;
+      if (d == null) { d = json_stringify(argument.default_value); }
+      extra_info.push("default: " @ d);
+    }
+    if (extra_info.length() > 0) {
+      let extra = "(" @ extra_info.join(", ") @ ")";
+      if (argument.description != "") { return argument.description @ " " @ extra; }
+      return extra;
+    }
+    return argument.description;
+  };
+
+  help.format_item_list = func(heading, items) {
+    if (items.length() == 0) { return []; }
+    let result = [heading];
+    for (it in items) { result.push(it); }
+    result.push("");
+    return result;
+  };
+
+  // Group items by their help group heading.
+  help.group_items = func(unsorted_items, visible_items, get_group) {
+    let groups = [];
+    let index = {};
+    for (item in unsorted_items) {
+      let g = get_group(item);
+      if (!index.has_key(g)) { index[g] = []; groups.push(g); }
+    }
+    for (item in visible_items) {
+      let g = get_group(item);
+      if (!index.has_key(g)) { index[g] = []; groups.push(g); }
+      index[g].push(item);
+    }
+    let result = [];
+    for (g in groups) { result.push({ group: g, items: index[g] }); }
+    return result;
+  };
+
+  help.format_help = func(cmd) {
+    let term_width = help.pad_width(cmd);
+    let help_width = (help.help_width == null) ? 80 : help.help_width;
+
+    let call_format_item = func(term, description) {
+      return help.format_item(term, term_width, description);
+    };
+
+    let output = ["Usage: " @ help.command_usage(cmd), ""];
+
+    let command_description = help.command_description(cmd);
+    if (command_description != "") {
+      output.push(help.box_wrap(command_description, help_width));
+      output.push("");
+    }
+
+    // Arguments
+    let argument_list = [];
+    for (argument in help.visible_arguments(cmd)) {
+      argument_list.push(call_format_item(help.argument_term(argument), help.argument_description(argument)));
+    }
+    output = output.concat(help.format_item_list("Arguments:", argument_list));
+
+    // Options (grouped)
+    let option_groups = help.group_items(cmd.options, help.visible_options(cmd), func(option) {
+      return (option.help_group_heading == null) ? "Options:" : option.help_group_heading;
+    });
+    for (og in option_groups) {
+      let option_list = [];
+      for (option in og.items) {
+        option_list.push(call_format_item(help.option_term(option), help.option_description(option)));
+      }
+      output = output.concat(help.format_item_list(og.group, option_list));
+    }
+
+    // Global options
+    if (help.show_global_options) {
+      let global_option_list = [];
+      for (option in help.visible_global_options(cmd)) {
+        global_option_list.push(call_format_item(help.option_term(option), help.option_description(option)));
+      }
+      output = output.concat(help.format_item_list("Global Options:", global_option_list));
+    }
+
+    // Commands (grouped)
+    let command_groups = help.group_items(cmd.commands, help.visible_commands(cmd), func(sub) {
+      let g = sub.help_group();
+      return (g == "") ? "Commands:" : g;
+    });
+    for (cg in command_groups) {
+      let command_list = [];
+      for (sub in cg.items) {
+        command_list.push(call_format_item(help.subcommand_term(sub), help.subcommand_description(sub)));
+      }
+      output = output.concat(help.format_item_list(cg.group, command_list));
+    }
+
+    return output.join("\n");
+  };
+
+  help.pad_width = func(cmd) {
+    let a = help.longest_option_term_length(cmd);
+    let b = help.longest_global_option_term_length(cmd);
+    let c = help.longest_subcommand_term_length(cmd);
+    let d = help.longest_argument_term_length(cmd);
+    let max = a;
+    if (b > max) { max = b; }
+    if (c > max) { max = c; }
+    if (d > max) { max = d; }
+    return max;
+  };
+
+  help.preformatted = func(str) {
+    // A newline followed by whitespace indicates manual indentation/wrapping.
+    let lines = str.split("\n");
+    for (line in lines) {
+      if (line.length() > 0 && (line.char_at(0) == " " || line.char_at(0) == "\t")) { return true; }
+    }
+    return false;
+  };
+
+  help.format_item = func(term, term_width, description) {
+    let item_indent = 2;
+    let item_indent_str = "  ";
+    if (description == "") { return item_indent_str @ term; }
+
+    let padded_term = term;
+    let pad = term_width - display_width(term);
+    if (pad > 0) {
+      let pad_str = "";
+      for (let i = 0; i < pad; i++) { pad_str = pad_str @ " "; }
+      padded_term = term @ pad_str;
+    }
+
+    let spacer_width = 2;
+    let spacer = "  ";
+    let help_width = (help.help_width == null) ? 80 : help.help_width;
+    let remaining_width = help_width - term_width - spacer_width - item_indent;
+    let formatted_description;
+    if (remaining_width < help.min_width_to_wrap || help.preformatted(description)) {
+      formatted_description = description;
+    } else {
+      let wrapped = help.box_wrap(description, remaining_width);
+      let cont_indent = "";
+      let indent_count = term_width + spacer_width;
+      for (let i = 0; i < indent_count; i++) { cont_indent = cont_indent @ " "; }
+      formatted_description = wrapped.replace("\n", "\n" @ cont_indent);
+    }
+
+    return item_indent_str @ padded_term @ spacer @ formatted_description.replace("\n", "\n" @ item_indent_str);
+  };
+
+  help.box_wrap = func(str, width) {
+    if (width < help.min_width_to_wrap) { return str; }
+
+    let raw_lines = str.split("\n");
+    let wrapped_lines = [];
+    for (line in raw_lines) {
+      let chunks = [];
+      let cur = "";
+      let in_word = false;
+      let word_start = 0;
+      let i = 0;
+      // Tokenise keeping leading whitespace attached to the following word.
+      while (i < line.length()) {
+        let c = line.char_at(i);
+        if (c == " " || c == "\t") {
+          if (in_word) {
+            chunks.push(line.substr(word_start, i - word_start));
+            in_word = false;
+          }
+          // Build whitespace+word chunk.
+          let ws_start = i;
+          while (i < line.length() && (line.char_at(i) == " " || line.char_at(i) == "\t")) { i++; }
+          while (i < line.length() && line.char_at(i) != " " && line.char_at(i) != "\t") { i++; }
+          chunks.push(line.substr(ws_start, i - ws_start));
+        } else {
+          if (!in_word) { in_word = true; word_start = i; }
+          i++;
+        }
+      }
+      if (in_word) { chunks.push(line.substr(word_start, i - word_start)); }
+
+      if (chunks.length() == 0) { wrapped_lines.push(""); continue; }
+
+      let sum_chunks = [chunks[0]];
+      let sum_width = display_width(chunks[0]);
+      for (let k = 1; k < chunks.length(); k++) {
+        let chunk = chunks[k];
+        let visible_width = display_width(chunk);
+        if (sum_width + visible_width <= width) {
+          sum_chunks.push(chunk);
+          sum_width = sum_width + visible_width;
+        } else {
+          wrapped_lines.push(sum_chunks.join(""));
+          let trimmed = chunk;
+          while (trimmed.length() > 0 && (trimmed.char_at(0) == " " || trimmed.char_at(0) == "\t")) {
+            trimmed = trimmed.substr(1);
+          }
+          sum_chunks = [trimmed];
+          sum_width = display_width(trimmed);
+        }
+      }
+      wrapped_lines.push(sum_chunks.join(""));
+    }
+    return wrapped_lines.join("\n");
+  };
+
+  // Style hooks (no colour in this port; identity functions).
+  help.style_title = func(str) { return str; };
+  help.style_usage = func(str) { return str; };
+  help.style_command_description = func(str) { return str; };
+  help.style_option_description = func(str) { return str; };
+  help.style_subcommand_description = func(str) { return str; };
+  help.style_argument_description = func(str) { return str; };
+  help.style_description_text = func(str) { return str; };
+  help.style_option_term = func(str) { return str; };
+  help.style_subcommand_term = func(str) { return str; };
+  help.style_argument_term = func(str) { return str; };
+  help.style_option_text = func(str) { return str; };
+  help.style_argument_text = func(str) { return str; };
+  help.style_subcommand_text = func(str) { return str; };
+  help.style_command_text = func(str) { return str; };
+
+  return help;
+}

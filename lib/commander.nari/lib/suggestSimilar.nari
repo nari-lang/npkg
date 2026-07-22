@@ -1,0 +1,105 @@
+// suggestSimilar.nari - "Did you mean ...?" suggestions.
+//
+// Port of commander.js lib/suggest_similar.js. Uses Damerau-Levenshtein
+// optimal string alignment distance to find close matches among candidate
+// command/option names.
+
+export let max_suggest_distance = 3;
+
+export func edit_distance(a, b) {
+  // https://en.wikipedia.org/wiki/Damerau-Levenshtein_distance
+  // Calculating optimal string alignment distance, no substring is edited
+  // more than once. (Simple implementation.)
+
+  // Quick early exit, return worst case.
+  if (math.abs(a.length() - b.length()) > max_suggest_distance) {
+    return math.max(a.length(), b.length());
+  }
+
+  let d = [];
+
+  // pure deletions turn a into empty string
+  for (let i = 0; i <= a.length(); i++) { d.push([i]); }
+  // pure insertions turn empty string into b
+  for (let j = 0; j <= b.length(); j++) { d[0][j] = j; }
+
+  // fill matrix
+  for (let j = 1; j <= b.length(); j++) {
+    for (let i = 1; i <= a.length(); i++) {
+      let cost = (a.char_at(i - 1) == b.char_at(j - 1)) ? 0 : 1;
+      let del = d[i - 1][j] + 1;
+      let ins = d[i][j - 1] + 1;
+      let sub = d[i - 1][j - 1] + cost;
+      let m = math.min(del, ins);
+      m = math.min(m, sub);
+      d[i][j] = m;
+      // transposition
+      if (i > 1 && j > 1 && a.char_at(i - 1) == b.char_at(j - 2) && a.char_at(i - 2) == b.char_at(j - 1)) {
+        let trans = d[i - 2][j - 2] + 1;
+        d[i][j] = math.min(d[i][j], trans);
+      }
+    }
+  }
+
+  return d[a.length()][b.length()];
+}
+
+// Find close matches, restricted to same number of edits.
+export func suggest_similar(word, candidates) {
+  if (candidates == null || candidates.length() == 0) { return ""; }
+
+  // remove possible duplicates
+  let seen = {};
+  let unique = [];
+  for (c in candidates) {
+    let key = c;
+    if (!seen.has_key(key)) { seen[key] = true; unique.push(c); }
+  }
+  candidates = unique;
+
+  let searching_options = word.starts_with("--");
+  let w = word;
+  let cands = [];
+  if (searching_options) {
+    w = word.substr(2);
+    for (c in candidates) { cands.push(c.substr(2)); }
+  } else {
+    for (c in candidates) { cands.push(c); }
+  }
+
+  let similar = [];
+  let best_distance = max_suggest_distance;
+  let min_similarity = 0.4;
+  for (cand in cands) {
+    if (cand.length() <= 1) { continue; } // no one character guesses
+
+    let distance = edit_distance(w, cand);
+    let len = math.max(w.length(), cand.length());
+    let similarity = (len - distance) / len;
+    if (similarity > min_similarity) {
+      if (distance < best_distance) {
+        // better edit distance, throw away previous worse matches
+        best_distance = distance;
+        similar = [cand];
+      } else if (distance == best_distance) {
+        similar.push(cand);
+      }
+    }
+  }
+
+  similar.sort(func(a, b) { return a < b ? -1 : (a > b ? 1 : 0); });
+
+  let out = similar;
+  if (searching_options) {
+    out = [];
+    for (s in similar) { out.push("--" @ s); }
+  }
+
+  if (out.length() > 1) {
+    return "\n(Did you mean one of " @ out.join(", ") @ "?)";
+  }
+  if (out.length() == 1) {
+    return "\n(Did you mean " @ out[0] @ "?)";
+  }
+  return "";
+}

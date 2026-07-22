@@ -1,62 +1,29 @@
 import Storage from "../../lib/storage.nari";
 import URLUtils from "../../lib/url_utils.nari";
+import PackageSpec from "../../lib/package_spec.nari";
 import Registry from "../../lib/registry.nari";
 
 // Delete a package, or a single version of a package, from the registry
-export func command_unpublish(args) {
-    let pkg_name = null;
+export func command_unpublish(package_spec, opts) {
+    package_spec = PackageSpec.parse_package_spec(package_spec);
     let version = null;
-    let registry_url = null;
-    let token = null;
-    let assume_yes = false;
-
-    let i = 1;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--version" || arg == "-v") {
-            i++;
-            if (i >= args.length()) { panic("--version requires a value"); }
-            version = args[i];
-        } else if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else if (arg == "--token" || arg == "-t") {
-            i++;
-            if (i >= args.length()) { panic("--token requires a value"); }
-            token = args[i];
-        } else if (arg == "--yes" || arg == "-y") {
-            assume_yes = true;
-        } else if (!arg.starts_with("-")) {
-            if (pkg_name != null) {
-                panic("Unexpected extra argument: " @ arg);
-            }
-            pkg_name = arg;
-        } else {
-            panic("Unknown flag: " @ arg);
-        }
-        i++;
-    }
-
-    if (pkg_name == null || pkg_name == "") {
-        panic("Usage: npkg unpublish <name> [--version <v>] [--registry <url>] [--yes]");
-    }
+    let registry_url = Registry.resolve_registry_url(opts.registry_url, null);
+    let token = opts.token;
+    let assume_yes = opts.yes;
 
     if (token == null) {
         token = Storage.load_credentials();
     }
     if (token == null || token == "") {
         panic("No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.");
-    }
-
-    registry_url = Registry.resolve_registry_url(registry_url, null);
+    };
 
     // Confirmation: by default prompt the user; --yes skips
     let target_desc;
-    if (version == null) {
-        target_desc = "package '" + pkg_name + "' (ALL versions)";
+    if (package_spec["requirement"] == null) {
+        target_desc = "package '" + package_spec["name"] + "' (ALL versions)";
     } else {
-        target_desc = "version " + version + " of '" + pkg_name + "'";
+        target_desc = "version " + package_spec["requirement"] + " of '" + package_spec["name"] + "'";
     }
 
     if (!assume_yes) {
@@ -76,6 +43,7 @@ export func command_unpublish(args) {
         }
     }
 
+    let pkg_name = package_spec["name"];
     let path = "/api/packages/" + URLUtils.url_encode_component(pkg_name);
     if (version != null) {
         path = path + "/versions/" + URLUtils.url_encode_component(version);

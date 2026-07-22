@@ -22,61 +22,6 @@ func valid_owner_username(name) {
     return true;
 }
 
-// shared arg parser for `owner add` / `owner rm`. args[0]="owner", args[1]=sub.
-// returns an object like: {pkg, user, registry, token}.
-func parse_owner_mutate_args(args, verb) {
-    let pkg_name = null;
-    let target_user = null;
-    let registry_url = null;
-    let token = null;
-
-    let i = 2;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else if (arg == "--token" || arg == "-t") {
-            i++;
-            if (i >= args.length()) { panic("--token requires a value"); }
-            token = args[i];
-        } else if (!arg.starts_with("-")) {
-            if (pkg_name == null) {
-                pkg_name = arg;
-            } else if (target_user == null) {
-                target_user = arg;
-            } else {
-                panic("Unexpected extra argument: " @ arg);
-            }
-        } else {
-            panic("Unknown flag: " @ arg);
-        }
-        i++;
-    }
-
-    if (pkg_name == null || target_user == null) {
-        panic("Usage: npkg owner " @ verb @ " <name> <user> [--registry <url>] [--token <key>]");
-    }
-    if (!valid_owner_username(target_user)) {
-        panic("Invalid username '" @ target_user @ "' (allowed: A-Z a-z 0-9 . _ -, max 64).");
-    }
-
-    if (token == null) {
-        token = Storage.load_credentials();
-    }
-    if (token == null || token == "") {
-        panic("No API token provided. Run `npkg login`, pass --token <key>, or set NPKG_TOKEN.");
-    }
-
-    return {
-        pkg: pkg_name,
-        user: target_user,
-        registry: Registry.resolve_registry_url(registry_url, null),
-        token: token
-    };
-}
-
 // surface the server-provided JSON {"error":"..."} verbatim when present
 func owner_failure_message(resp, verb) {
     let body_result = JSON.parse(resp.body);
@@ -93,22 +38,22 @@ func owner_failure_message(resp, verb) {
     return "registry returned status " @ sc;
 }
 
-func command_owner_add(args) {
-    let parsed = parse_owner_mutate_args(args, "add");
-    let url = parsed.registry + "/api/packages/" + URLUtils.url_encode_component(parsed.pkg) + "/owners";
-    let body = "{\"username\":\"" + parsed.user + "\"}";
-
-    let resp_result = http.fetch(url, {
+export func command_owner_add(package, user) {
+    let registry_url = Registry.resolve_registry_url(registry_url, null);
+    let token = Storage.load_credentials();
+    let resp_result = http.fetch(registry_url + "/api/packages/" + URLUtils.url_encode_component(package) + "/owners", {
             method: "POST",
             headers: {
-                "Authorization": "Bearer " + parsed.token,
+                "Authorization": "Bearer " + token,
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             },
-            body: body
+            body: JSON.stringify({
+                username: user
+            }).unwrap()
         }).await;
     if (resp_result.is_err()) {
-        panic("Failed to reach registry at " + parsed.registry + ": " + resp_result.unwrap_err());
+        panic("Failed to reach registry at " + registry_url + ": " + resp_result.unwrap_err());
     }
     let resp = resp_result.unwrap();
     if (resp.status_code >= 200 && resp.status_code < 300) {
@@ -117,29 +62,25 @@ func command_owner_add(args) {
         if (ok_msg != null && ok_msg != "") {
             print(ok_msg);
         } else {
-            print("Added " + parsed.user + " as owner of " + parsed.pkg + ".");
+            print("Added " + user + " as owner of " + package + ".");
         }
         return;
     }
     panic("owner add failed: " + owner_failure_message(resp, "add"));
 }
 
-func command_owner_rm(args) {
-    let parsed = parse_owner_mutate_args(args, "rm");
-    let url = parsed.registry + "/api/packages/"
-              + URLUtils.url_encode_component(parsed.pkg)
-              + "/owners/"
-              + URLUtils.url_encode_component(parsed.user);
-
-    let resp_result = http.fetch(url, {
+export func command_owner_rm(package, user) {
+    let registry_url = Registry.resolve_registry_url(registry_url, null);
+    let token = Storage.load_credentials();
+    let resp_result = http.fetch(registry_url + "/api/packages/" + URLUtils.url_encode_component(package) + "/owners/" + URLUtils.url_encode_component(user), {
             method: "DELETE",
             headers: {
-                "Authorization": "Bearer " + parsed.token,
+                "Authorization": "Bearer " + token,
                 "Accept": "application/json"
             }
         }).await;
     if (resp_result.is_err()) {
-        panic("Failed to reach registry at " + parsed.registry + ": " + resp_result.unwrap_err());
+        panic("Failed to reach registry at " + registry_url + ": " + resp_result.unwrap_err());
     }
     let resp = resp_result.unwrap();
     if (resp.status_code >= 200 && resp.status_code < 300) {
@@ -148,43 +89,18 @@ func command_owner_rm(args) {
         if (ok_msg != null && ok_msg != "") {
             print(ok_msg);
         } else {
-            print("Removed " + parsed.user + " from owners of " + parsed.pkg + ".");
+            print("Removed " + user + " from owners of " + package + ".");
         }
         return;
     }
     panic("owner rm failed: " + owner_failure_message(resp, "rm"));
 }
 
-func command_owner_ls(args) {
-    let pkg_name = null;
-    let registry_url = null;
+export func command_owner_ls(package) {
+    let registry_url = Registry.resolve_registry_url(registry_url, null);
+    let token = Storage.load_credentials();
 
-    // args[0] = "owner", args[1] = "ls", remaining are flags / positional.
-    let i = 2;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else if (!arg.starts_with("-")) {
-            if (pkg_name != null) {
-                panic("Unexpected extra argument: " @ arg);
-            }
-            pkg_name = arg;
-        } else {
-            panic("Unknown flag: " @ arg);
-        }
-        i++;
-    }
-
-    if (pkg_name == null || pkg_name == "") {
-        panic("Usage: npkg owner ls <name> [--registry <url>]");
-    }
-
-    registry_url = Registry.resolve_registry_url(registry_url, null);
-
-    let url = registry_url @ "/api/packages/" @ URLUtils.url_encode_component(pkg_name) @ "/owners";
+    let url = registry_url @ "/api/packages/" @ URLUtils.url_encode_component(package) @ "/owners";
 
     let resp_result = http.fetch(url).await;
     if (resp_result.is_err()) {
@@ -225,24 +141,4 @@ func command_owner_ls(args) {
             print("  " + username + "  (since " + added_at + ")");
         }
     }
-}
-
-export func command_owner(args) {
-    if (args.length() < 2) {
-        panic("Usage: npkg owner <ls|add|rm> ...");
-    }
-    let sub = args[1];
-    if (sub == "ls" || sub == "list") {
-        command_owner_ls(args);
-        return;
-    }
-    if (sub == "add") {
-        command_owner_add(args);
-        return;
-    }
-    if (sub == "rm" || sub == "remove") {
-        command_owner_rm(args);
-        return;
-    }
-    panic("Unknown owner subcommand: " + sub + " (expected: ls, add, rm)");
 }

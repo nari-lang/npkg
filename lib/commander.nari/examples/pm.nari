@@ -1,0 +1,57 @@
+// Port of the commander.js "pm" example to Nari (subcommands with action handlers).
+//
+// Try:
+//   nari examples/pm.nari --help
+//   nari examples/pm.nari install lodash express chalk
+//   nari examples/pm.nari i lodash        # alias
+//   nari examples/pm.nari list
+//   nari examples/pm.nari search react --limit 5
+//   nari examples/pm.nari help install
+
+import "../commander.nari";
+
+let program = create_command("pm");
+
+program
+  .name("pm")
+  .description("Fake package manager")
+  .version("0.0.1");
+
+// install: variadic argument, alias, custom argument parser
+program
+  .command("install [packages...]")
+  .description("install one or more packages")
+  .alias("i")
+  .option("-f, --force", "force reinstall")
+  .action(func(packages, options) {
+    print("Installing " @ packages.length() @ " package(s): " @ packages.join(", "));
+    if (options.force) { print("  (forcing reinstall)"); }
+  });
+
+// list: no arguments
+program
+  .command("list")
+  .description("list installed packages")
+  .option("-a, --all", "show all, including hidden")
+  .action(func(options) {
+    print("Installed packages:");
+    print("  lodash");
+    print("  express");
+    if (options.all) { print("  .config (hidden)"); }
+  });
+
+// search: required argument with a custom numeric parser via argParser
+program
+  .command("search <query>")
+  .description("search for packages")
+  .option("--limit <n>", "maximum results", func(val) {
+    let n = parse_int(val);
+    if (n <= 0) { return invalid_argument_error("limit must be a positive number"); }
+    return n;
+  }, 10)
+  .action(func(query, options) {
+    print("Searching for '" @ query @ "' (limit " @ to_string(options.limit) @ ")...");
+    print("  found: " @ query @ "-core, " @ query @ "-utils");
+  });
+
+program.parse();

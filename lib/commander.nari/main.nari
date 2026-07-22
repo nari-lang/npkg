@@ -1,0 +1,44 @@
+// commander.nari - the command-line parser library (index/entry point).
+//
+// This is a port of commander.js (v15) to the Nari language. The
+// implementation is split across lib/ mirroring the original JavaScript layout:
+//
+//   lib/error.nari          - CommanderError, InvalidArgumentError
+//   lib/suggestSimilar.nari - "Did you mean ...?" suggestions
+//   lib/argument.nari       - Argument
+//   lib/option.nari        - Option, DualOptions
+//   lib/help.nari           - Help
+//   lib/command.nari        - Command
+//
+// Importing this file brings the public API into scope as globals:
+//   program, Command, Option, Argument, Help,
+//   create_command, create_option, create_argument,
+//   CommanderError, InvalidArgumentError
+//
+// Usage:
+//   import "commander.nari";
+//   let program = createCommand("mycli");
+//   program.option("-p, --port <n>", "port number", "8080").parse();
+
+import { Command } from "lib/command.nari";
+import { Option } from "lib/option.nari";
+import { Argument } from "lib/argument.nari";
+import { Help } from "lib/help.nari";
+import { commander_error, invalid_argument_error } from "lib/error.nari";
+
+global Command = Command;
+global Option = Option;
+global Argument = Argument;
+global Help = Help;
+global commander_error = commander_error;
+global invalid_argument_error = invalid_argument_error;
+
+func create_command(name) { return Command(name); }
+func create_option(flags, description) { return Option(flags, description); }
+func create_argument(name, description) { return Argument(name, description); }
+
+global create_command = create_command;
+global create_option = create_option;
+global create_argument = create_argument;
+
+global program = Command();

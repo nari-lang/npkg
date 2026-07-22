@@ -1,0 +1,35 @@
+import "../main.nari";
+
+let program = create_command("mycli");
+program
+  .name("mycli")
+  .description("a test cli")
+  .version("1.0.0")
+  .option("-p, --port <n>", "port number", "8080")
+  .option("-v, --verbose", "verbose output")
+  .option("-c, --cheese [type]", "add cheese with optional type")
+  .argument("[input]", "input file")
+  .action(func(input, options) {
+    print("action called");
+    print("input:", input);
+    print("port:", options.port);
+    print("verbose:", options.verbose);
+    print("cheese:", options.cheese);
+  });
+
+print("=== parse: no args ===");
+program.parse(["mycli"], { from: "user" });
+
+print("=== parse: --port 3000 file.txt ===");
+let p2 = create_command("mycli");
+p2.name("mycli").option("-p, --port <n>", "port", "8080").option("-v, --verbose", "verbose").argument("[input]").action(func(input, options) {
+  print("input:", input, "port:", options.port, "verbose:", options.verbose);
+});
+p2.parse(["--port", "3000", "file.txt"], { from: "user" });
+
+print("=== parse: -v --cheese mozzarella data ===");
+let p3 = create_command("mycli");
+p3.name("mycli").option("-v, --verbose").option("-c, --cheese [type]", "cheese").argument("[input]").action(func(input, options) {
+  print("input:", input, "cheese:", options.cheese, "verbose:", options.verbose);
+});
+p3.parse(["-v", "--cheese", "mozzarella", "data"], { from: "user" });

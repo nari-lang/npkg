@@ -12,23 +12,20 @@ func render_init_entry(package_name) {
     return "print(\"Hello from " @ package_name @ "!\");\n";
 }
 
-export func command_init(args) {
-    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
-    let package_name = args[2] ? args[2] : "example/app";
+export func command_init(project_dir, package_name) {
+    project_dir = Path.normalize_path(project_dir);
     let manifest_path = Path.join_path(project_dir, "nari.toml");
     let entry_path = Path.join_path(project_dir, "src/main.nari");
-
-    fs.mkdir_all(project_dir);
-    fs.mkdir_all(Path.dirname(entry_path));
 
     if (fs.file_exists(manifest_path).await) {
         panic("Refusing to overwrite existing manifest at " @ manifest_path);
     }
 
+    fs.mkdir_all(project_dir);
+    fs.mkdir_all(Path.dirname(entry_path));
+    
     FileUtils.write_text(manifest_path, render_init_manifest(package_name));
-    if (!fs.file_exists(entry_path).await) {
-        FileUtils.write_text(entry_path, render_init_entry(package_name));
-    }
+    FileUtils.write_text(entry_path, render_init_entry(package_name));
 
     print("Created project at " @ project_dir);
     print("Manifest: " @ manifest_path);

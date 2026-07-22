@@ -1,0 +1,114 @@
+import "../main.nari";
+
+func test(label, fn) {
+  print("=== " @ label @ " ===");
+  fn();
+  print("");
+}
+
+test("negatable option", func() {
+  let p = create_command("t");
+  p.option("--no-color", "disable color").action(func(options) {
+    print("color:", options.color);
+  });
+  p.parse([], { from: "user" });
+  let p2 = create_command("t");
+  p2.option("--no-color").action(func(options) { print("color2:", options.color); });
+  p2.parse(["--no-color"], { from: "user" });
+});
+
+test("--foo=bar long flag with value", func() {
+  let p = create_command("t");
+  p.option("--port <n>").action(func(o) { print("port:", o.port); });
+  p.parse(["--port=9090"], { from: "user" });
+});
+
+test("combined short flags -abc", func() {
+  let p = create_command("t");
+  p.option("-a").option("-b").option("-c").action(func(o) { print("a:", o.a, "b:", o.b, "c:", o.c); });
+  p.parse(["-abc"], { from: "user" });
+});
+
+test("short flag with attached value -p8080", func() {
+  let p = create_command("t");
+  p.option("-p <port>").action(func(o) { print("port:", o.p); });
+  p.parse(["-p8080"], { from: "user" });
+});
+
+test("negative number as argument", func() {
+  let p = create_command("t");
+  p.argument("<n>").action(func(n) { print("n:", n); });
+  p.parse(["-5"], { from: "user" });
+});
+
+test("custom argParser returning value", func() {
+  let p = create_command("t");
+  p.option("--count <n>", "count", func(v) { return parse_int(v); }).action(func(o) { print("count:", o.count, "type:", typeof(o.count)); });
+  p.parse(["--count", "42"], { from: "user" });
+});
+
+test("custom argParser returning InvalidArgumentError", func() {
+  let p = create_command("t");
+  p.option("--count <n>", "count", func(v) {
+    let n = parse_int(v);
+    if (n < 0) { return invalid_argument_error("must be non-negative"); }
+    return n;
+  }).action(func(o) { print("count:", o.count); });
+  p.exit_override(func(err) { print("  [exit " @ err.exit_code @ "] " @ err.message); return true; });
+  p.parse(["--count", "-3"], { from: "user" });
+});
+
+test("conflicts", func() {
+  let p = create_command("t");
+  p.add_option(create_option("--json", "json output").conflicts("yaml"))
+   .add_option(create_option("--yaml", "yaml output"))
+   .action(func(o) { print("json:", o.json, "yaml:", o.yaml); });
+  p.exit_override(func(err) { print("  [exit " @ err.exit_code @ "] " @ err.message); return true; });
+  p.parse(["--json", "--yaml"], { from: "user" });
+  let p2 = create_command("t");
+  p2.add_option(create_option("--json").conflicts("yaml")).add_option(create_option("--yaml")).action(func(o) { print("only json:", o.json, "yaml:", o.yaml); });
+  p2.parse(["--json"], { from: "user" });
+});
+
+test("implies", func() {
+  let p = create_command("t");
+  p.add_option(create_option("--log", "log").implies({ verbose: true }))
+   .add_option(create_option("--verbose", "verbose"))
+   .action(func(o) { print("log:", o.log, "verbose:", o.verbose); });
+  p.parse(["--log"], { from: "user" });
+});
+
+test("env var", func() {
+  let p = create_command("t");
+  p.add_option(create_option("--token <t>", "api token").env("MY_TOKEN")).action(func(o) { print("token:", o.token); });
+  p.parse([], { from: "user" });
+});
+
+test("hooks (preAction/postAction)", func() {
+  let p = create_command("t");
+  p.argument("<x>").hook("pre_action", func(this_cmd, action_cmd) { print("preAction for " @ action_cmd.name()); })
+    .hook("post_action", func(this_cmd, action_cmd) { print("postAction for " @ action_cmd.name()); })
+    .action(func(x) { print("action: " @ x); });
+  p.parse(["hello"], { from: "user" });
+});
+
+test("addHelpText", func() {
+  let p = create_command("t");
+  p.description("a test").option("-v", "verbose").add_help_text("before", "=== mycli ===").action(func() {});
+  p.exit_override(func(err) { return true; });
+  p.parse(["--help"], { from: "user" });
+});
+
+test("custom help option flag", func() {
+  let p = create_command("t");
+  p.description("test").help_option("-?, --help", "show help").option("-v").action(func() {});
+  print("help info:", p.help_information({}));
+});
+
+test("opts with globals (parent options visible)", func() {
+  let prog = create_command("cli");
+  prog.option("-g, --global <val>", "global");
+  let sub = prog.command("sub").action(func(o) { print("sub opts:", o); print("sub optsWithGlobals:", sub.opts_with_globals()); });
+  prog.enable_positional_options(true);
+  prog.parse(["-g", "gv", "sub"], { from: "user" });
+});

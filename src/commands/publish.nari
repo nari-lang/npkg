@@ -6,41 +6,13 @@ import Workspace from "../../lib/workspace.nari";
 import Publish from "../../lib/publish.nari";
 import Utils from "../../lib/utils.nari";
 
-export func command_publish(args) {
-    // publish [project_dir] [--registry <url>] [--token <key>] [--workspace] [--dry-run]
-    let project_dir = ".";
-    let registry_url = null;
-    let token = null;
-    let workspace_mode = false;
-    let dry_run = false;
-    let allow_dirty = false;
-
-    let i = 1;
-    while (i < args.length()) {
-        let arg = args[i];
-        if (arg == "--registry" || arg == "-r") {
-            i++;
-            if (i >= args.length()) { panic("--registry requires a value"); }
-            registry_url = args[i];
-        } else if (arg == "--token" || arg == "-t") {
-            i++;
-            if (i >= args.length()) { panic("--token requires a value"); }
-            token = args[i];
-        } else if (arg == "--workspace" || arg == "--all") {
-            workspace_mode = true;
-        } else if (arg == "--dry-run" || arg == "-n") {
-            dry_run = true;
-        } else if (arg == "--allow-dirty") {
-            allow_dirty = true;
-        } else if (!arg.starts_with("-")) {
-            project_dir = arg;
-        } else {
-            panic("Unknown flag: " @ arg);
-        }
-        i++;
-    }
-
-    project_dir = Path.normalize_path(project_dir);
+export func command_publish(opts) {
+    let project_dir = Path.normalize_path(".");
+    let registry_url = opts.registry;
+    let token = opts.token;
+    let workspace_mode = opts.workspace;
+    let dry_run = opts.dry_run;
+    let allow_dirty = opts.allow_dirty;
 
     if (token == null) {
         token = Storage.load_credentials();

@@ -2,8 +2,8 @@ import Path from "../../lib/path_utils.nari";
 import LockfileReader from "../../lib/lockfile_reader.nari";
 import Store from "../../lib/store.nari";
 
-export func command_clean(args) {
-    let project_dir = Path.normalize_path(args[1] ? args[1] : ".");
+export func command_clean() {
+    let project_dir = ".";
     let lockfile_path = Path.join_path(project_dir, "nari.lock.toml");
 
     if (!fs.file_exists(lockfile_path).await) {

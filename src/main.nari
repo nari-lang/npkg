@@ -1,130 +1,85 @@
 #!/usr/bin/env nari
+import "../lib/commander.nari/main.nari";
 import { command_init } from "./commands/init.nari";
 import { command_install } from "./commands/install.nari";
-import { command_add } from "./commands/add.nari";
-import { command_clean } from "./commands/clean.nari";
-import { command_list } from "./commands/list.nari";
 import { command_update } from "./commands/update.nari";
-import { command_publish } from "./commands/publish.nari";
+import { command_list } from "./commands/list.nari";
+import { command_clean } from "./commands/clean.nari";
 import { command_login } from "./commands/login.nari";
 import { command_search } from "./commands/search.nari";
+import { command_publish } from "./commands/publish.nari";
 import { command_unpublish } from "./commands/unpublish.nari";
-import { command_owner } from "./commands/owner.nari";
-
-func cli_args() {
-    let args = [];
-    let i = 0;
-    if (process.argv.length() > 0) {
-        if (process.argv[0].ends_with(".nari") || process.argv[0].ends_with(".naric")) {
-            i = 1;
-        } else {
-            i = 2;
-        }
-    }
-    while (i < process.argv.length()) {
-        args.push(process.argv[i]);
-        i++;
-    }
-    return args;
-}
-
-func print_usage() {
-    print("npkg - Nari package manager");
-    print("Usage:");
-    print("  npkg init    [project_dir] [package_name] create a new project");
-    print("  npkg install [project_dir]                install all deps of a project");
-    print("  npkg install <pkg[@ver|@latest]> ...      add & install packages into .");
-    print("  npkg add     [project_dir] <name[@version|@latest]> add a dep and install");
-    print("  npkg update  [project_dir]                upgrade packages within constraints");
-    print("  npkg list    [project_dir]                show installed packages");
-    print("  npkg clean   [project_dir]                remove unused store entries");
-    print("  npkg publish [project_dir]                publish package to registry");
-    print("               --registry <url>             registry base URL (optional override)");
-    print("               --token    <key>             API key (or set NPKG_TOKEN)");
-    print("               --workspace                  publish every workspace member in topo order");
-    print("               --dry-run                    stage + archive, but skip upload");
-    print("               --allow-dirty                allow publishing with uncommitted git changes");
-    print("  npkg login   [--registry <url>]           log in and save credentials");
-    print("  npkg search  <query>                      search for packages on registry");
-    print("               --registry <url>             registry base URL (optional override)");
-    print("               --page     <n>               page number (default: 1)");
-    print("  npkg unpublish <name>                     remove a package from the registry");
-    print("               --version  <v>               only delete this version (keep package)");
-    print("               --registry <url>             registry base URL (optional override)");
-    print("               --token    <key>             API key (or set NPKG_TOKEN)");
-    print("               --yes / -y                   skip the interactive y/N prompt");
-    print("  npkg owner ls  <name>                     list owners of a package");
-    print("  npkg owner add <name> <user>              grant <user> co-ownership of <name>");
-    print("  npkg owner rm  <name> <user>              remove <user> from owners of <name>");
-    print("               --registry <url>             registry base URL (optional override)");
-    print("               --token    <key>             API key (or set NPKG_TOKEN; add/rm only)");
-}
+import { command_owner_add, command_owner_rm, command_owner_ls } from "./commands/owner.nari";
 
 func start() {
-    let args = cli_args();
-    if (args.length() == 0) {
-        print_usage();
-        return;
-    }
+    let program = create_command("npkg")
+        .version("0.3.2")
+        .description("npkg is the package manager for nari");
 
-    let command = args[0];
+    program.command("init")
+        .description("create a new project")
+        .argument("[project-dir]", "directory to create the project in", ".")
+        .argument("[package-name]", "name of the package to create", "example/app")
+        .action(command_init);
+    program.command("add")
+        .description("add a dep and install")
+        .argument("<package-spec...>", "list of packages to add to your project")
+        .action(command_install);
+    program.command("install")
+        .description("install all deps of a project")
+        .alias("i")
+        .argument("[package-spec...]", "list of packages to install")
+        .action(command_install);
+    program.command("update")
+        .description("upgrade packages within constraints")
+        .action(command_update);
+    program.command("list")
+        .description("show installed packages")
+        .action(command_list);
+    program.command("clean")
+        .description("remove unused store entries")
+        .action(command_clean);
 
-    if (command == "init") {
-        command_init(args);
-        return;
-    }
-
-    if (command == "install") {
-        command_install(args);
-        return;
-    }
-
-    if (command == "add") {
-        command_add(args);
-        return;
-    }
-
-    if (command == "clean") {
-        command_clean(args);
-        return;
-    }
-
-    if (command == "list") {
-        command_list(args);
-        return;
-    }
-
-    if (command == "update") {
-        command_update(args);
-        return;
-    }
-
-    if (command == "publish") {
-        command_publish(args);
-        return;
-    }
-
-    if (command == "login") {
-        command_login(args);
-        return;
-    }
-
-    if (command == "search") {
-        command_search(args);
-        return;
-    }
-
-    if (command == "unpublish") {
-        command_unpublish(args);
-        return;
-    }
-
-    if (command == "owner") {
-        command_owner(args);
-        return;
-    }
-
-    print("Unknown command: " @ command);
-    print_usage();
-    process.exit(1);
+    program.command("login")
+        .description("log in and save credentials")
+        .option("-r, --registry <url>", "registry URL to log in to")
+        .action(command_login);
+    program.command("search")
+        .description("search for packages on registry")
+        .argument("<query>", "search query")
+        .option("-r, --registry <url>", "registry URL to log in to")
+        .option("-p, --page <page>", "what page of the search to display", 1)
+        .option("--per-page <items>", "how many items per page", 20)
+        .action(command_search);
+    program.command("publish")
+        .description("publish package to registry")
+        .option("-r, --registry <url>", "registry URL to publish to")
+        .option("-t, --token <key>", "API token to use for publishing")
+        .option("--workspace, --all", "publish all packages in the workspace", false)
+        .option("--dry-run, -n", "perform a dry run without actually publishing", false)
+        .option("--allow-dirty", "allow publishing of dirty workspaces", false)
+        .action(command_publish);
+    program.command("unpublish")
+        .description("remove a package from the registry")
+        .argument("<package-spec>", "package spec to unpublish")
+        .option("-r, --registry <url>", "registry URL to publish to")
+        .option("-t, --token <key>", "API token to use for publishing")
+        .option("-y, --yes", "assume yes to confirmation prompt", false)
+        .action(command_unpublish);
+    let owner_cmd = program.command("owner").description("manage package owners");
+    owner_cmd.command("add")
+        .description("grant <user> co-ownership of <package>")
+        .argument("<package>", "package to add owner to")
+        .argument("<user>", "user to add as owner")
+        .action(command_owner_add);
+    owner_cmd.command("rm")
+        .description("remove <user> from owners of <package>")
+        .argument("<package>", "package to remove owner from")
+        .argument("<user>", "user to remove as owner")
+        .action(command_owner_rm);
+    owner_cmd.command("ls")
+        .argument("<package>", "package to list owners of")
+        .description("list owners of a package")
+        .action(command_owner_ls);
+    program.parse()
 }

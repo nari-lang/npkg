@@ -1,0 +1,1355 @@
+// command.nari - The Command factory.
+//
+// Port of commander.js lib/command.js. A Command is a closure-based object
+// (Nari class methods cannot call callbacks or see top-level functions, so we
+// use the factory pattern instead of a class). Supports options, arguments,
+// subcommands, action handlers, hooks, help, and the option-parsing pipeline.
+
+import { Argument, human_readable_arg_name } from "argument.nari";
+import { commander_error, is_invalid_argument } from "error.nari";
+import { Help } from "help.nari";
+import { Option, dual_options } from "option.nari";
+import { suggest_similar } from "suggestSimilar.nari";
+
+// Call `fn` with the arguments in `args` (an array). Nari's spread of a
+// closure-captured array that contains object elements currently fails, so we
+// copy the array into a fresh local first and then spread that.
+func apply_args(fn, args) {
+  let copy = [];
+  for (v in args) { copy.push(v); }
+  return fn(...copy);
+}
+
+// Internal: call a user parse_arg/arg_parser callback and convert an
+// InvalidArgumentError return value into a command error.
+func _call_parse_arg(target, value, previous, cmd, invalid_argument_message) {
+  let result;
+  if (target.parse_arg != null) {
+    result = target.parse_arg(value, previous);
+  } else {
+    result = value;
+  }
+  if (is_invalid_argument(result)) {
+    let message = invalid_argument_message @ " " @ result.message;
+    cmd.error(message, { exit_code: result.exit_code, code: result.code });
+  }
+  return result;
+}
+
+export func Command(name) {
+  let _description = "";
+  let _summary = "";
+  let _version = null;
+  let _version_option_name = null;
+  let _usage = null;
+  let _script_path = null;
+  let _aliases = [];
+  let options = [];
+  let commands = [];
+  let registered_arguments = [];
+  let option_values = {};
+  let option_value_sources = {};
+  let listeners = {};
+  let action_handler = null;
+  let _allow_unknown_option = false;
+  let _allow_excess_arguments = false;
+  let _combine_flag_and_optional_value = true;
+  let _enable_positional_options = false;
+  let _pass_through_options = false;
+  let _store_options_as_properties = false;
+  let _exit_callback = null;
+  let _life_cycle_hooks = {};
+  let _show_help_after_error = false;
+  let _show_suggestion_after_error = true;
+  let _help_option = null;
+  let _help_option_lazy = true;
+  let _help_command = null;
+  let _help_command_lazy = false;
+  let _add_implicit_help_command = null;
+  let _help_configuration = {};
+  let _default_command_name = null;
+  let _executable_file = null;
+  let _executable_dir = null;
+  let _help_group_heading = null;
+  let _default_command_group = null;
+  let _default_option_group = null;
+
+  let _output_configuration = {
+    write_out: func(str) { print(str); },
+    write_err: func(str) { print(str); },
+    output_error: func(str, write) { write(str); },
+    get_out_help_width: func() { return null; },
+    get_err_help_width: func() { return null; },
+    get_out_has_colors: func() { return false; },
+    get_err_has_colors: func() { return false; },
+    strip_color: func(str) { return str; }
+  };
+
+  let self = null;
+
+  // --- Internal emitter ---------------------------------------------------
+  let do_emit = func(event, arg, has_arg) {
+    if (listeners.has_key(event)) {
+      for (cb in listeners[event]) {
+        if (has_arg) { cb(arg); } else { cb(); }
+      }
+    }
+  };
+
+  // --- Internal: option value handling -----------------------------------
+  let handle_option_value = func(option, val, invalid_value_message, value_source) {
+    let name = option.attribute_name();
+    if (val == null && option._has_preset) { val = option.preset_arg; }
+
+    let old_value = self.get_option_value(name);
+    if (val != null && option.parse_arg != null) {
+      val = _call_parse_arg(option, val, old_value, self, invalid_value_message);
+    } else if (val != null && option.variadic) {
+      val = option._collect_value(val, old_value);
+    }
+
+    if (val == null) {
+      if (option.negate) {
+        val = false;
+      } else if (option.is_boolean() || option.optional) {
+        val = true;
+      } else {
+        val = "";
+      }
+    }
+
+    // choices validation for options
+    if (option.arg_choices != null && val != null && !is_bool(val)) {
+      let ok = false;
+      for (c in option.arg_choices) { if (to_string(c) == to_string(val)) { ok = true; } }
+      if (!ok) {
+        let list = [];
+        for (c in option.arg_choices) { list.push(to_string(c)); }
+        let msg = invalid_value_message @ " Allowed choices are " @ list.join(", ") @ ".";
+        self.error(msg, { code: "commander.invalid_argument" });
+      }
+    }
+
+    self.set_option_value_with_source(name, val, value_source);
+  };
+
+  self = {
+    // Backwards-compatible direct fields used by Help. These are the source of
+    // truth for state that external code (Help, subcommands) reads as properties.
+    commands: commands,
+    options: options,
+    registered_arguments: registered_arguments,
+    parent: null,
+    args: [],
+    raw_args: [],
+    processed_args: [],
+    running_command: null,
+    aliases_list: _aliases,
+    _hidden: false,
+    _args_description: null,
+    _name: name ?? "",
+    _output_configuration: _output_configuration,
+    _help_option: _help_option,
+    _help_option_lazy: _help_option_lazy,
+    _help_command: _help_command,
+    _help_command_lazy: _help_command_lazy,
+    _help_configuration: _help_configuration,
+    _exit_callback: _exit_callback,
+    _store_options_as_properties: _store_options_as_properties,
+    _combine_flag_and_optional_value: _combine_flag_and_optional_value,
+    _allow_excess_arguments: _allow_excess_arguments,
+    _enable_positional_options: _enable_positional_options,
+    _pass_through_options: _pass_through_options,
+    _allow_unknown_option: _allow_unknown_option,
+    _show_help_after_error: _show_help_after_error,
+    _show_suggestion_after_error: _show_suggestion_after_error,
+    _aborted: false,
+    _life_cycle_hooks: _life_cycle_hooks,
+
+    // --- identification ---
+    name: func(str) {
+      if (str == null) { return self._name; }
+      self._name = str;
+      return self;
+    },
+
+    name_from_filename: func(filename) {
+      // Strip directory and extension.
+      let base = filename;
+      let slash = base.last_index_of("/");
+      if (slash != -1) { base = base.substr(slash + 1); }
+      let dot = base.last_index_of(".");
+      if (dot != -1) { base = base.substr(0, dot); }
+      self._name = base;
+      return self;
+    },
+
+    executable_dir: func(path) {
+      if (path == null) { return _executable_dir; }
+      _executable_dir = path;
+      return self;
+    },
+
+    // --- description / summary / version ---
+    description: func(str, args_description) {
+      if (str == null && args_description == null) { return _description; }
+      _description = str ?? "";
+      if (args_description != null) { self._args_description = args_description; }
+      return self;
+    },
+
+    summary: func(str) {
+      if (str == null) { return _summary; }
+      _summary = str;
+      return self;
+    },
+
+    version: func(str, flags, desc) {
+      if (str == null) { return _version; }
+      _version = str;
+      flags = flags ?? "-V, --version";
+      desc = desc ?? "output the version number";
+      let version_option = self.create_option(flags, desc);
+      _version_option_name = version_option.attribute_name();
+      self._register_option(version_option);
+      self.on("option:" @ version_option.name(), func() {
+        self._output_configuration.write_out(str @ "\n");
+        self._exit(0, "commander.version", str);
+      });
+      return self;
+    },
+
+    // --- aliases / usage ---
+    alias: func(alias) {
+      if (alias == null) { return _aliases[0]; }
+      _aliases.push(alias);
+      return self;
+    },
+
+    aliases: func(al) {
+      if (al == null) { return _aliases; }
+      for (a in al) { _aliases.push(a); }
+      return self;
+    },
+
+    usage: func(str) {
+      if (str == null) {
+        if (_usage != null) { return _usage; }
+        let parts = [];
+        let has_opts = options.length() > 0 || self._help_option != null;
+        if (has_opts) { parts.push("[options]"); }
+        if (commands.length() > 0) { parts.push("[command]"); }
+        let arg_parts = [];
+        for (arg in registered_arguments) { arg_parts.push(human_readable_arg_name(arg)); }
+        if (arg_parts.length() > 0) { parts.push(arg_parts.join(" ")); }
+        return parts.join(" ");
+      }
+      _usage = str;
+      return self;
+    },
+
+    // --- option/argument factories ---
+    create_option: func(flags, desc) { return Option(flags, desc); },
+    create_argument: func(name, desc) { return Argument(name, desc); },
+    create_command: func(n) { return Command(n); },
+    create_help: func() {
+      let h = Help();
+      let cfg = self._help_configuration;
+      let keys = cfg.keys();
+      for (k in keys) { h[k] = cfg[k]; }
+      return h;
+    },
+
+    // --- options ---
+    add_option: func(option) {
+      self._register_option(option);
+      let oname = option.name();
+      let name = option.attribute_name();
+
+      if (option._has_default) {
+        self.set_option_value_with_source(name, option.default_value, "default");
+      }
+
+      self.on("option:" @ oname, func(val) {
+        let invalid_value_message = "error: option '" @ option.flags @ "' argument '" @ to_string(val) @ "' is invalid.";
+        handle_option_value(option, val, invalid_value_message, "cli");
+      });
+
+      if (option.env_var != null) {
+        self.on("option_env:" @ oname, func(val) {
+          let invalid_value_message = "error: option '" @ option.flags @ "' value '" @ to_string(val) @ "' from env '" @ option.env_var @ "' is invalid.";
+          handle_option_value(option, val, invalid_value_message, "env");
+        });
+      }
+
+      return self;
+    },
+
+    _register_option: func(option) {
+      let matching = null;
+      if (option.short != null) { matching = self._find_option(option.short); }
+      if (matching == null && option.long != null) { matching = self._find_option(option.long); }
+      if (matching != null) {
+        let flag = (option.long != null && self._find_option(option.long) != null) ? option.long : option.short;
+        panic("Cannot add option '" @ option.flags @ "' due to conflicting flag '" @ flag @ "'");
+      }
+      self._init_option_group(option);
+      options.push(option);
+    },
+
+    _option_ex: func(config, flags, desc, fn, default_value) {
+      let option = self.create_option(flags, desc);
+      option.make_option_mandatory(config.mandatory == true);
+      if (is_function(fn)) {
+        option.default(default_value).arg_parser(fn);
+      } else {
+        option.default(fn);
+      }
+      return self.add_option(option);
+    },
+
+    option: func(flags, desc, parse_arg, default_value) {
+      return self._option_ex({}, flags, desc, parse_arg, default_value);
+    },
+
+    required_option: func(flags, desc, parse_arg, default_value) {
+      return self._option_ex({ mandatory: true }, flags, desc, parse_arg, default_value);
+    },
+
+    // --- arguments ---
+    add_argument: func(argument) {
+      let prev = null;
+      if (registered_arguments.length() > 0) { prev = registered_arguments[registered_arguments.length() - 1]; }
+      if (prev != null && prev.variadic) {
+        panic("only the last argument can be variadic '" @ prev.name() @ "'");
+      }
+      registered_arguments.push(argument);
+      return self;
+    },
+
+    argument: func(name, desc, parse_arg, default_value) {
+      let argument = self.create_argument(name, desc);
+      if (is_function(parse_arg)) {
+        argument.default(default_value).arg_parser(parse_arg);
+      } else {
+        argument.default(parse_arg);
+      }
+      return self.add_argument(argument);
+    },
+
+    arguments: func(names) {
+      let parts = names.trim().split(" ");
+      for (p in parts) {
+        if (p != "") { self.argument(p); }
+      }
+      return self;
+    },
+
+    // --- subcommands ---
+    command: func(name_and_args, action_opts_or_exec_desc, exec_opts) {
+      let desc = action_opts_or_exec_desc;
+      let opts = exec_opts;
+      if (is_object(desc)) { opts = desc; desc = null; }
+      opts = opts ?? {};
+
+      // Split "name args..." into name and args.
+      let parts = name_and_args.split(" ");
+      let name = parts[0];
+      let arg_str = null;
+      if (parts.length() > 1) {
+        let rest = [];
+        for (let i = 1; i < parts.length(); i++) { rest.push(parts[i]); }
+        arg_str = rest.join(" ");
+      }
+
+      let cmd = self.create_command(name);
+      if (desc != null) {
+        cmd.description(desc);
+      }
+      if (opts.is_default == true) { _default_command_name = cmd._name; }
+      cmd._hidden = (opts.no_help == true || opts.hidden == true);
+      cmd._executable_file = opts.executable_file ?? null;
+      if (arg_str != null) { cmd.arguments(arg_str); }
+      self._register_command(cmd);
+      cmd.parent = self;
+      cmd.copy_inherited_settings(self);
+
+      if (desc != null) { return self; }
+      return cmd;
+    },
+
+    add_command: func(cmd, opts) {
+      if (cmd._name == "") {
+        panic("Command passed to .addCommand() must have a name");
+      }
+      opts = opts ?? {};
+      if (opts.is_default == true) { _default_command_name = cmd._name; }
+      if (opts.no_help == true || opts.hidden == true) { cmd._hidden = true; }
+      self._register_command(cmd);
+      cmd.parent = self;
+      return self;
+    },
+
+    _register_command: func(command) {
+      self._init_command_group(command);
+      commands.push(command);
+    },
+
+    _find_command: func(name) {
+      if (name == null || name == "") { return null; }
+      for (cmd in commands) {
+        if (cmd._name == name) { return cmd; }
+        for (a in cmd.aliases_list) { if (a == name) { return cmd; } }
+      }
+      return null;
+    },
+
+    _find_option: func(arg) {
+      for (option in options) {
+        if (option.is(arg)) { return option; }
+      }
+      return null;
+    },
+
+    copy_inherited_settings: func(source_command) {
+      self._output_configuration = source_command._output_configuration;
+      self._help_option = source_command._help_option;
+      self._help_option_lazy = source_command._help_option_lazy;
+      self._help_command = source_command._help_command;
+      self._help_command_lazy = source_command._help_command_lazy;
+      self._help_configuration = source_command._help_configuration;
+      self._exit_callback = source_command._exit_callback;
+      self._store_options_as_properties = source_command._store_options_as_properties;
+      self._combine_flag_and_optional_value = source_command._combine_flag_and_optional_value;
+      self._allow_excess_arguments = source_command._allow_excess_arguments;
+      self._enable_positional_options = source_command._enable_positional_options;
+      self._show_help_after_error = source_command._show_help_after_error;
+      self._show_suggestion_after_error = source_command._show_suggestion_after_error;
+      return self;
+    },
+
+    _get_command_and_ancestors: func() {
+      let result = [];
+      let c = self;
+      while (c != null) { result.push(c); c = c.parent; }
+      return result;
+    },
+
+    // --- option value accessors ---
+    get_option_value: func(key) {
+      if (self._store_options_as_properties) { return self[key]; }
+      if (option_values.has_key(key)) { return option_values[key]; }
+      return null;
+    },
+
+    set_option_value: func(key, value) {
+      return self.set_option_value_with_source(key, value, null);
+    },
+
+    set_option_value_with_source: func(key, value, source) {
+      if (self._store_options_as_properties) {
+        self[key] = value;
+      } else {
+        option_values[key] = value;
+      }
+      option_value_sources[key] = source;
+      return self;
+    },
+
+    get_option_value_source: func(key) {
+      if (option_value_sources.has_key(key)) { return option_value_sources[key]; }
+      return null;
+    },
+
+    get_option_value_source_with_globals: func(key) {
+      let source = null;
+      for (cmd in self._get_command_and_ancestors()) {
+        let s = cmd.get_option_value_source(key);
+        if (s != null) { source = s; }
+      }
+      return source;
+    },
+
+    opts: func() {
+      if (self._store_options_as_properties) {
+        let result = {};
+        for (option in options) {
+          let key = option.attribute_name();
+          result[key] = (key == _version_option_name) ? _version : self[key];
+        }
+        return result;
+      }
+      return option_values;
+    },
+
+    opts_with_globals: func() {
+      let combined = {};
+      for (cmd in self._get_command_and_ancestors()) {
+        let o = cmd.opts();
+        let keys = o.keys();
+        for (k in keys) { combined[k] = o[k]; }
+      }
+      return combined;
+    },
+
+    // --- emitter ---
+    on: func(event, cb) {
+      if (!listeners.has_key(event)) { listeners[event] = []; }
+      listeners[event].push(cb);
+      return self;
+    },
+
+    emit: func(event, arg) {
+      // Note: rest parameters do not work in object-literal methods in Nari,
+      // so the public emitter takes a single optional argument.
+      let has_arg = (arg != null);
+      do_emit(event, arg, has_arg);
+      return self;
+    },
+
+    listener_count: func(event) {
+      if (listeners.has_key(event)) { return listeners[event].length(); }
+      return 0;
+    },
+
+    // --- hooks ---
+    hook: func(event, listener) {
+      let allowed = ["pre_subcommand", "pre_action", "post_action"];
+      let ok = false;
+      for (a in allowed) { if (a == event) { ok = true; } }
+      if (!ok) {
+        panic("Unexpected value for event passed to hook : '" @ event @ "'. Expecting one of 'pre_subcommand', 'pre_action', 'post_action'");
+      }
+      if (self._life_cycle_hooks.has_key(event)) { self._life_cycle_hooks[event].push(listener); }
+      else { self._life_cycle_hooks[event] = [listener]; }
+      return self;
+    },
+
+    // --- exit override ---
+    exit_override: func(fn) {
+      if (fn != null) {
+        self._exit_callback = fn;
+      } else {
+        self._exit_callback = func(err) {
+          if (err.code != "commander.execute_sub_command_async") { panic(err.message); }
+        };
+      }
+      return self;
+    },
+
+    _exit: func(exit_code, code, message) {
+      let cb = self._exit_callback;
+      let ancestor = self.parent;
+      while (cb == null && ancestor != null) {
+        cb = ancestor._exit_callback;
+        ancestor = ancestor.parent;
+      }
+      if (cb != null) {
+        let handled = cb(commander_error(exit_code, code, message));
+        if (handled == true) {
+          // Callback took responsibility; do not exit. Mark aborted so the
+          // parse/action pipeline stops processing.
+          self._aborted = true;
+          return;
+        }
+      }
+      process.exit(exit_code);
+    },
+
+    // --- error output ---
+    error: func(message, error_options) {
+      self._output_configuration.output_error(message @ "\n", self._output_configuration.write_err);
+      if (is_string(self._show_help_after_error)) {
+        self._output_configuration.write_err(self._show_help_after_error @ "\n");
+      } else if (self._show_help_after_error) {
+        self._output_configuration.write_err("\n");
+        self.output_help({ error: true });
+      }
+      let config = error_options ?? {};
+      let exit_code = config.exit_code ?? 1;
+      let code = config.code ?? "commander.error";
+      self._exit(exit_code, code, message);
+    },
+
+    // --- parse options config ---
+    combine_flag_and_optional_value: func(combine) {
+      self._combine_flag_and_optional_value = (combine == null) ? true : (combine == true);
+      return self;
+    },
+    allow_unknown_option: func(allow) {
+      self._allow_unknown_option = (allow == null) ? true : (allow == true);
+      return self;
+    },
+    allow_excess_arguments: func(allow) {
+      self._allow_excess_arguments = (allow == null) ? true : (allow == true);
+      return self;
+    },
+    enable_positional_options: func(positional) {
+      self._enable_positional_options = (positional == null) ? true : (positional == true);
+      return self;
+    },
+    pass_through_options: func(pass_through) {
+      self._pass_through_options = (pass_through == null) ? true : (pass_through == true);
+      return self;
+    },
+    store_options_as_properties: func(store_as_properties) {
+      self._store_options_as_properties = (store_as_properties == null) ? true : (store_as_properties == true);
+      return self;
+    },
+
+    configure_help: func(configuration) {
+      if (configuration == null) { return self._help_configuration; }
+      self._help_configuration = configuration;
+      return self;
+    },
+
+    configure_output: func(configuration) {
+      if (configuration == null) { return self._output_configuration; }
+      let keys = configuration.keys();
+      for (k in keys) { self._output_configuration[k] = configuration[k]; }
+      return self;
+    },
+
+    show_help_after_error: func(display_help) {
+      if (is_string(display_help)) { self._show_help_after_error = display_help; }
+      else { self._show_help_after_error = (display_help == null) ? true : (display_help == true); }
+      return self;
+    },
+
+    show_suggestion_after_error: func(display_suggestion) {
+      self._show_suggestion_after_error = (display_suggestion == null) ? true : (display_suggestion == true);
+      return self;
+    },
+
+    // --- help groups ---
+    help_group: func(heading) {
+      if (heading == null) { return _help_group_heading ?? ""; }
+      _help_group_heading = heading;
+      return self;
+    },
+    commands_group: func(heading) {
+      if (heading == null) { return _default_command_group ?? ""; }
+      _default_command_group = heading;
+      return self;
+    },
+    options_group: func(heading) {
+      if (heading == null) { return _default_option_group ?? ""; }
+      _default_option_group = heading;
+      return self;
+    },
+    _init_option_group: func(option) {
+      if (_default_option_group != null && option.help_group_heading == null) { option.help_group(_default_option_group); }
+    },
+    _init_command_group: func(cmd) {
+      if (_default_command_group != null && cmd.help_group() == "") { cmd.help_group(_default_command_group); }
+    },
+
+    // --- action ---
+    action: func(fn) {
+      action_handler = func(call_args) { return apply_args(fn, call_args); };
+      return self;
+    },
+
+    // --- help option / command ---
+    help_option: func(flags, description) {
+      if (is_bool(flags)) {
+        if (flags == true) {
+          if (self._help_option == null) { self._help_option = null; self._help_option_lazy = true; }
+        } else {
+          self._help_option = null; self._help_option_lazy = false;
+        }
+        return self;
+      }
+      let f = flags ?? "-h, --help";
+      let d = description ?? "display help for command";
+      self._help_option = self.create_option(f, d);
+      self._help_option_lazy = false;
+      return self;
+    },
+
+    add_help_option: func(option) {
+      self._help_option = option;
+      self._help_option_lazy = false;
+      return self;
+    },
+
+    _get_help_option: func() {
+      if (self._help_option_lazy) {
+        self._help_option = self.create_option("-h, --help", "display help for command");
+        self._help_option_lazy = false;
+      }
+      return self._help_option;
+    },
+
+    help_command: func(enable_or_name_and_args, description) {
+      if (is_bool(enable_or_name_and_args)) {
+        _add_implicit_help_command = enable_or_name_and_args;
+        return self;
+      }
+      let name_and_args = enable_or_name_and_args ?? "help [command]";
+      let parts = name_and_args.split(" ");
+      let help_name = parts[0];
+      let help_args = null;
+      if (parts.length() > 1) {
+        let rest = [];
+        for (let i = 1; i < parts.length(); i++) { rest.push(parts[i]); }
+        help_args = rest.join(" ");
+      }
+      let help_description = description ?? "display help for command";
+
+      let help_cmd = self.create_command(help_name);
+      help_cmd.help_option(false);
+      if (help_args != null) { help_cmd.arguments(help_args); }
+      if (help_description != "") { help_cmd.description(help_description); }
+
+      _add_implicit_help_command = true;
+      self._help_command = help_cmd;
+      self._help_command_lazy = false;
+      return self;
+    },
+
+    add_help_command: func(help_command, deprecated_description) {
+      _add_implicit_help_command = true;
+      self._help_command = help_command;
+      self._help_command_lazy = false;
+      return self;
+    },
+
+    _get_help_command: func() {
+      let has_implicit = _add_implicit_help_command;
+      if (has_implicit == null) {
+        has_implicit = commands.length() > 0 && action_handler == null && self._find_command("help") == null;
+      }
+      if (has_implicit) {
+        if (self._help_command == null) {
+          self.help_command(null, null);
+        }
+        return self._help_command;
+      }
+      return null;
+    },
+
+    add_help_text: func(position, text) {
+      let allowed = ["before_all", "before", "after", "after_all"];
+      let ok = false;
+      for (a in allowed) { if (a == position) { ok = true; } }
+      if (!ok) {
+        panic("Unexpected value for position to add_help_text. Expecting one of 'before_all', 'before', 'after', 'after_all'");
+      }
+      self.on(position @ "_help", func(context) {
+        let help_str = is_function(text) ? text({ error: context.error, command: context.command }) : text;
+        if (help_str != "" && help_str != null) { context.write(help_str @ "\n"); }
+      });
+      return self;
+    },
+
+    // --- help output ---
+    help_information: func(context_options) {
+      let helper = self.create_help();
+      let context = self._get_output_context(context_options);
+      helper.prepare_context({ error: context.error, help_width: context.help_width, output_has_colors: context.has_colors });
+      let text = helper.format_help(self);
+      if (!context.has_colors) { return self._output_configuration.strip_color(text); }
+      return text;
+    },
+
+    _get_output_context: func(context_options) {
+      let ctx = context_options ?? {};
+      let error = ctx.error == true;
+      let base_write;
+      let has_colors;
+      let help_width;
+      if (error) {
+        base_write = func(str) { self._output_configuration.write_err(str); };
+        has_colors = self._output_configuration.get_err_has_colors();
+        help_width = self._output_configuration.get_err_help_width();
+      } else {
+        base_write = func(str) { self._output_configuration.write_out(str); };
+        has_colors = self._output_configuration.get_out_has_colors();
+        help_width = self._output_configuration.get_out_help_width();
+      }
+      let write = func(str) {
+        if (!has_colors) { str = self._output_configuration.strip_color(str); }
+        return base_write(str);
+      };
+      return { error: error, write: write, has_colors: has_colors, help_width: help_width };
+    },
+
+    output_help: func(context_options) {
+      let ctx = context_options ?? {};
+      let output_context = self._get_output_context(ctx);
+      let event_context = { error: output_context.error, write: output_context.write, command: self };
+
+      let ancestors = self._get_command_and_ancestors();
+      // before_all_help in reverse order
+      for (let i = ancestors.length() - 1; i >= 0; i--) { ancestors[i].emit("before_all_help", event_context); }
+      self.emit("before_help", event_context);
+
+      let info = self.help_information({ error: output_context.error });
+      output_context.write(info);
+
+      let help_option = self._get_help_option();
+      if (help_option != null && help_option.long != null) { self.emit(help_option.long); }
+      self.emit("after_help", event_context);
+      for (cmd in ancestors) { cmd.emit("after_all_help", event_context); }
+    },
+
+    help: func(context_options) {
+      self.output_help(context_options);
+      let exit_code = 0;
+      if (context_options != null && context_options.error == true) { exit_code = 1; }
+      self._exit(exit_code, "commander.help", "(outputHelp)");
+    },
+
+    _output_help_if_requested: func(arr) {
+      let help_option = self._get_help_option();
+      if (help_option == null) { return; }
+      let requested = false;
+      for (arg in arr) {
+        if (help_option.is(arg)) { requested = true; }
+      }
+      if (requested) {
+        self.output_help();
+        self._exit(0, "commander.help_displayed", "(outputHelp)");
+      }
+    },
+
+    // --- parse ---
+    _prepare_user_args: func(argv, parse_options) {
+      let opts = parse_options ?? {};
+      if (argv == null) { argv = process.argv; }
+      self.raw_args = argv.slice(0);
+      let user_args;
+      let from = opts.from;
+      if (from == "user") {
+        user_args = argv.slice(0);
+      } else if (from == "eval") {
+        user_args = argv.slice(1);
+      } else {
+        // default ('node'): argv[0] is the script in Nari, user args follow.
+        _script_path = (argv.length() > 0) ? argv[0] : null;
+        user_args = argv.slice(1);
+      }
+      if (self._name == "" && _script_path != null) { self.name_from_filename(_script_path); }
+      if (self._name == "") { self._name = "program"; }
+      return user_args;
+    },
+
+    parse: func(argv, parse_options) {
+      self._prepare_for_parse();
+      let user_args = self._prepare_user_args(argv, parse_options);
+      self._parse_command([], user_args);
+      return self;
+    },
+
+    parse_async: func(argv, parse_options) {
+      self._prepare_for_parse();
+      let user_args = self._prepare_user_args(argv, parse_options);
+      self._parse_command([], user_args);
+      return self;
+    },
+
+    _prepare_for_parse: func() {
+      self._aborted = false;
+      // Default lone negated options to true.
+      for (option in options) {
+        if (option.negate && !option._has_default) {
+          let key = option.attribute_name();
+          if (self.get_option_value(key) == null) {
+            let positive_long = option.long.replace("--no-", "--");
+            if (self._find_option(positive_long) == null) {
+              self.set_option_value_with_source(key, true, "default");
+            }
+          }
+        }
+      }
+    },
+
+    _parse_command: func(operands, unknown) {
+      let parsed = self.parse_options(unknown);
+      self._parse_options_env();
+      self._parse_options_implied();
+      if (self._aborted) { return self; }
+      let ops = [];
+      for (v in operands) { ops.push(v); }
+      for (v in parsed.operands) { ops.push(v); }
+      let unk = parsed.unknown;
+      let combined_args = [];
+      for (v in ops) { combined_args.push(v); }
+      for (v in unk) { combined_args.push(v); }
+      self.args = combined_args;
+
+      if (ops.length() > 0 && self._find_command(ops[0]) != null) {
+        return self._dispatch_subcommand(ops[0], ops.slice(1), unk);
+      }
+      let hc = self._get_help_command();
+      if (hc != null && ops.length() > 0 && ops[0] == hc._name) {
+        return self._dispatch_help_command(ops.length() > 1 ? ops[1] : null);
+      }
+      if (_default_command_name != null) {
+        self._output_help_if_requested(unk);
+        return self._dispatch_subcommand(_default_command_name, ops, unk);
+      }
+      if (commands.length() > 0 && self.args.length() == 0 && action_handler == null && _default_command_name == null) {
+        self.help({ error: true });
+      }
+
+      self._output_help_if_requested(parsed.unknown);
+      if (self._aborted) { return self; }
+      self._check_for_missing_mandatory_options();
+      if (self._aborted) { return self; }
+      self._check_for_conflicting_options();
+      if (self._aborted) { return self; }
+
+      let check_for_unknown_options = func() {
+        if (parsed.unknown.length() > 0) { self.unknown_option(parsed.unknown[0]); }
+      };
+
+      if (action_handler != null) {
+        check_for_unknown_options();
+        if (self._aborted) { return self; }
+        self._process_arguments();
+        if (self._aborted) { return self; }
+        self._chain_or_call_hooks("pre_action");
+        let call_args = [];
+        for (v in self.processed_args) { call_args.push(v); }
+        call_args.push(self.opts());
+        call_args.push(self);
+        action_handler(call_args);
+        if (self.parent != null) { self.parent.emit("command:" @ self.name()); }
+        self._chain_or_call_hooks("post_action");
+        return self;
+      }
+
+      if (ops.length() > 0) {
+        if (self._find_command("*") != null) {
+          return self._dispatch_subcommand("*", ops, unk);
+        }
+        if (self.listener_count("command:*") > 0) {
+          self.emit("command:*");
+        } else if (commands.length() > 0) {
+          self.unknown_command();
+        } else {
+          check_for_unknown_options();
+          self._process_arguments();
+        }
+      } else if (commands.length() > 0) {
+        check_for_unknown_options();
+        self.help({ error: true });
+      } else {
+        check_for_unknown_options();
+        self._process_arguments();
+      }
+      return self;
+    },
+
+    _dispatch_subcommand: func(command_name, operands, unknown) {
+      let sub_command = self._find_command(command_name);
+      if (sub_command == null) { self.help({ error: true }); }
+      sub_command._prepare_for_parse();
+      self._chain_or_call_sub_command_hook(sub_command, "pre_subcommand");
+      return sub_command._parse_command(operands, unknown);
+    },
+
+    _dispatch_help_command: func(subcommand_name) {
+      if (subcommand_name == null || subcommand_name == "") { return self.help(); }
+      let sub_command = self._find_command(subcommand_name);
+      if (sub_command != null) {
+        return sub_command.help();
+      }
+      // Fallback: parse the help flag to invoke help for the subcommand.
+      let help_option = self._get_help_option();
+      let flag = "--help";
+      if (help_option != null) {
+        if (help_option.long != null) { flag = help_option.long; }
+        else if (help_option.short != null) { flag = help_option.short; }
+      }
+      return self._dispatch_subcommand(subcommand_name, [], [flag]);
+    },
+
+    // --- option parsing ---
+    parse_options: func(args_arr) {
+      let operands = [];
+      let unknown = [];
+      let dest = operands;
+
+      let maybe_option = func(arg) {
+        return arg.length() > 1 && arg.char_at(0) == "-";
+      };
+
+      let negative_number_arg = func(arg) {
+        if (!arg.starts_with("-")) { return false; }
+        let rest = arg.substr(1);
+        if (rest.length() == 0) { return false; }
+        // must be digits, optionally one dot, optional exponent
+        let saw_dot = false;
+        let saw_e = false;
+        for (let i = 0; i < rest.length(); i++) {
+          let c = rest.char_at(i);
+          if (c >= "0" && c <= "9") { continue; }
+          if (c == "." && !saw_dot && !saw_e) { saw_dot = true; continue; }
+          if ((c == "e" || c == "E") && !saw_e && i > 0) { saw_e = true; continue; }
+          if ((c == "+" || c == "-") && saw_e && (i == rest.length() - 1 || (rest.char_at(i - 1) == "e" || rest.char_at(i - 1) == "E"))) { continue; }
+          return false;
+        }
+        // negative number is ok unless a digit short option exists in hierarchy
+        let ancestors = self._get_command_and_ancestors();
+        for (cmd in ancestors) {
+          for (opt in cmd.options) {
+            let s = opt.short;
+            if (s != null && s.length() == 2 && s.char_at(0) == "-" && s.char_at(1) >= "0" && s.char_at(1) <= "9") {
+              return false;
+            }
+          }
+        }
+        return true;
+      };
+
+      let active_variadic_option = null;
+      let active_group = null;
+      let i = 0;
+      while (i < args_arr.length() || active_group != null) {
+        let arg = (active_group != null) ? active_group : args_arr[i];
+        if (active_group == null) { i = i + 1; }
+        active_group = null;
+
+        if (arg == "--") {
+          if (dest == unknown) { dest.push(arg); }
+          for (let k = i; k < args_arr.length(); k++) { dest.push(args_arr[k]); }
+          break;
+        }
+
+        if (active_variadic_option != null && (!maybe_option(arg) || negative_number_arg(arg))) {
+          do_emit("option:" @ active_variadic_option.name(), arg, true);
+          continue;
+        }
+        active_variadic_option = null;
+
+        if (maybe_option(arg)) {
+          let option = self._find_option(arg);
+          if (option != null) {
+            if (option.required) {
+              let value = (i < args_arr.length()) ? args_arr[i] : null;
+              i = i + 1;
+              if (value == null) { self.option_missing_argument(option); }
+              do_emit("option:" @ option.name(), value, true);
+            } else if (option.optional) {
+              let value = null;
+              if (i < args_arr.length() && (!maybe_option(args_arr[i]) || negative_number_arg(args_arr[i]))) {
+                value = args_arr[i];
+                i = i + 1;
+              }
+              do_emit("option:" @ option.name(), value, value != null);
+            } else {
+              do_emit("option:" @ option.name(), null, false);
+            }
+            active_variadic_option = option.variadic ? option : null;
+            continue;
+          }
+        }
+
+        // Combo short options following single dash, e.g. -abc
+        if (arg.length() > 2 && arg.char_at(0) == "-" && arg.char_at(1) != "-") {
+          let option = self._find_option("-" @ arg.char_at(1));
+          if (option != null) {
+            if (option.required || (option.optional && self._combine_flag_and_optional_value)) {
+              do_emit("option:" @ option.name(), arg.substr(2), true);
+            } else {
+              do_emit("option:" @ option.name(), null, false);
+              active_group = "-" @ arg.substr(2);
+            }
+            continue;
+          }
+        }
+
+        // Long flag with =value, e.g. --foo=bar
+        if (arg.starts_with("--") && arg.includes("=")) {
+          let idx = arg.index_of("=");
+          let flag_part = arg.substr(0, idx);
+          let option = self._find_option(flag_part);
+          if (option != null && (option.required || option.optional)) {
+            do_emit("option:" @ option.name(), arg.substr(idx + 1), true);
+            continue;
+          }
+        }
+
+        if (dest == operands && maybe_option(arg) && !(commands.length() == 0 && negative_number_arg(arg))) {
+          dest = unknown;
+        }
+
+        if ((self._enable_positional_options || self._pass_through_options) && operands.length() == 0 && unknown.length() == 0) {
+          if (self._find_command(arg) != null) {
+            operands.push(arg);
+            for (let k = i; k < args_arr.length(); k++) { unknown.push(args_arr[k]); }
+            break;
+          } else if (self._get_help_command() != null && arg == self._get_help_command()._name) {
+            operands.push(arg);
+            for (let k = i; k < args_arr.length(); k++) { operands.push(args_arr[k]); }
+            break;
+          } else if (_default_command_name != null) {
+            unknown.push(arg);
+            for (let k = i; k < args_arr.length(); k++) { unknown.push(args_arr[k]); }
+            break;
+          }
+        }
+
+        if (self._pass_through_options) {
+          dest.push(arg);
+          for (let k = i; k < args_arr.length(); k++) { dest.push(args_arr[k]); }
+          break;
+        }
+
+        dest.push(arg);
+      }
+
+      return { operands: operands, unknown: unknown };
+    },
+
+    _parse_options_env: func() {
+      for (option in options) {
+        if (option.env_var != null) {
+          let env_val = platform.getenv(option.env_var);
+          if (env_val != null) {
+            let option_key = option.attribute_name();
+            let current = self.get_option_value(option_key);
+            let source = self.get_option_value_source(option_key);
+            if (current == null || source == "default" || source == "config" || source == "env") {
+              if (option.required || option.optional) {
+                do_emit("option_env:" @ option.name(), env_val, true);
+              } else {
+                do_emit("option_env:" @ option.name(), null, false);
+              }
+            }
+          }
+        }
+      }
+    },
+
+    _parse_options_implied: func() {
+      let dual_helper = dual_options(options);
+      let has_custom_option_value = func(option_key) {
+        let v = self.get_option_value(option_key);
+        if (v == null) { return false; }
+        let source = self.get_option_value_source(option_key);
+        return source != "default" && source != "implied";
+      };
+      for (option in options) {
+        if (option.implied != null) {
+          let key = option.attribute_name();
+          if (has_custom_option_value(key) && dual_helper.value_from_option(self.get_option_value(key), option)) {
+            let implied_keys = option.implied.keys();
+            for (implied_key in implied_keys) {
+              if (!has_custom_option_value(implied_key)) {
+                self.set_option_value_with_source(implied_key, option.implied[implied_key], "implied");
+              }
+            }
+          }
+        }
+      }
+    },
+
+    // --- argument processing ---
+    _check_number_of_arguments: func() {
+      for (let idx = 0; idx < registered_arguments.length(); idx++) {
+        let arg = registered_arguments[idx];
+        if (arg.required && (idx >= self.args.length() || self.args[idx] == null)) {
+          self.missing_argument(arg.name());
+        }
+      }
+      if (registered_arguments.length() > 0) {
+        let last = registered_arguments[registered_arguments.length() - 1];
+        if (last.variadic) { return; }
+      }
+      if (self.args.length() > registered_arguments.length()) {
+        self._excess_arguments(self.args);
+      }
+    },
+
+    _process_arguments: func() {
+      self._check_number_of_arguments();
+      let result = [];
+      for (let index = 0; index < registered_arguments.length(); index++) {
+        let declared_arg = registered_arguments[index];
+        let value = declared_arg.default_value;
+        if (!declared_arg._has_default) { value = null; }
+        if (declared_arg.variadic) {
+          if (index < self.args.length()) {
+            let collected = [];
+            for (let k = index; k < self.args.length(); k++) { collected.push(self.args[k]); }
+            if (declared_arg.parse_arg != null) {
+              let acc = declared_arg._has_default ? declared_arg.default_value : null;
+              for (v in collected) {
+                let invalid_value_message = "error: command-argument value '" @ v @ "' is invalid for argument '" @ declared_arg.name() @ "'.";
+                acc = _call_parse_arg(declared_arg, v, acc, self, invalid_value_message);
+              }
+              value = acc;
+            } else {
+              // choices validation for variadic
+              if (declared_arg.arg_choices != null) {
+                let cleaned = [];
+                for (v in collected) {
+                  let ok = false;
+                  for (c in declared_arg.arg_choices) { if (to_string(c) == to_string(v)) { ok = true; } }
+                  if (!ok) {
+                    let list = [];
+                    for (c in declared_arg.arg_choices) { list.push(to_string(c)); }
+                    self.error("error: command-argument value '" @ v @ "' is invalid for argument '" @ declared_arg.name() @ "'. Allowed choices are " @ list.join(", ") @ ".", { code: "commander.invalid_argument" });
+                  }
+                  cleaned.push(v);
+                }
+                value = cleaned;
+              } else {
+                value = collected;
+              }
+            }
+          } else {
+            value = [];
+          }
+        } else if (index < self.args.length()) {
+          value = self.args[index];
+          if (declared_arg.parse_arg != null) {
+            let invalid_value_message = "error: command-argument value '" @ value @ "' is invalid for argument '" @ declared_arg.name() @ "'.";
+            value = _call_parse_arg(declared_arg, value, declared_arg._has_default ? declared_arg.default_value : null, self, invalid_value_message);
+          } else if (declared_arg.arg_choices != null) {
+            let ok = false;
+            for (c in declared_arg.arg_choices) { if (to_string(c) == to_string(value)) { ok = true; } }
+            if (!ok) {
+              let list = [];
+              for (c in declared_arg.arg_choices) { list.push(to_string(c)); }
+              self.error("error: command-argument value '" @ value @ "' is invalid for argument '" @ declared_arg.name() @ "'. Allowed choices are " @ list.join(", ") @ ".", { code: "commander.invalid_argument" });
+            }
+          }
+        }
+        result.push(value);
+      }
+      self.processed_args = result;
+    },
+
+    // --- hooks chaining ---
+    _chain_or_call_hooks: func(event) {
+      let hooks = [];
+      let ancestors = self._get_command_and_ancestors();
+      let ordered = [];
+      for (let i = ancestors.length() - 1; i >= 0; i--) { ordered.push(ancestors[i]); }
+      for (cmd in ordered) {
+        if (cmd._life_cycle_hooks.has_key(event)) {
+          for (cb in cmd._life_cycle_hooks[event]) { hooks.push({ cmd: cmd, cb: cb }); }
+        }
+      }
+      if (event == "post_action") { hooks.reverse(); }
+      for (h in hooks) { h.cb(h.cmd, self); }
+    },
+
+    _chain_or_call_sub_command_hook: func(sub_command, event) {
+      if (self._life_cycle_hooks.has_key(event)) {
+        for (hook in self._life_cycle_hooks[event]) { hook(self, sub_command); }
+      }
+    },
+
+    // --- validation errors ---
+    _check_for_missing_mandatory_options: func() {
+      for (cmd in self._get_command_and_ancestors()) {
+        for (an_option in cmd.options) {
+          if (an_option.mandatory && cmd.get_option_value(an_option.attribute_name()) == null) {
+            cmd.missing_mandatory_option_value(an_option);
+          }
+        }
+      }
+    },
+
+    _check_for_conflicting_local_options: func() {
+      let defined_non_default_options = [];
+      for (option in options) {
+        let option_key = option.attribute_name();
+        let v = self.get_option_value(option_key);
+        if (v == null) { continue; }
+        let source = self.get_option_value_source(option_key);
+        if (source == "default") { continue; }
+        defined_non_default_options.push(option);
+      }
+      for (option in defined_non_default_options) {
+        if (option.conflicts_with.length() > 0) {
+          for (conflicting_and_defined in defined_non_default_options) {
+            let is_conflicting = false;
+            for (c in option.conflicts_with) { if (c == conflicting_and_defined.attribute_name()) { is_conflicting = true; } }
+            if (is_conflicting) { self._conflicting_option(option, conflicting_and_defined); }
+          }
+        }
+      }
+    },
+
+    _check_for_conflicting_options: func() {
+      for (cmd in self._get_command_and_ancestors()) { cmd._check_for_conflicting_local_options(); }
+    },
+
+    missing_argument: func(name) {
+      self.error("error: missing required argument '" @ name @ "'", { code: "commander.missing_argument" });
+    },
+
+    option_missing_argument: func(option) {
+      self.error("error: option '" @ option.flags @ "' argument missing", { code: "commander.option_missing_argument" });
+    },
+
+    missing_mandatory_option_value: func(option) {
+      self.error("error: required option '" @ option.flags @ "' not specified", { code: "commander.missing_mandatory_option_value" });
+    },
+
+    _conflicting_option: func(option, conflicting_option) {
+      let get_error_message = func(opt) {
+        let key = opt.attribute_name();
+        let source = self.get_option_value_source(key);
+        if (source == "env") { return "environment variable '" @ opt.env_var @ "'"; }
+        return "option '" @ opt.flags @ "'";
+      };
+      let message = "error: " @ get_error_message(option) @ " cannot be used with " @ get_error_message(conflicting_option);
+      self.error(message, { code: "commander.conflicting_option" });
+    },
+
+    unknown_option: func(flag) {
+      if (self._allow_unknown_option) { return; }
+      let suggestion = "";
+      if (flag.starts_with("--") && self._show_suggestion_after_error) {
+        let candidate_flags = [];
+        let command = self;
+        while (command != null) {
+          let helper = command.create_help();
+          for (option in helper.visible_options(command)) {
+            if (option.long != null) { candidate_flags.push(option.long); }
+          }
+          command = command.parent;
+          if (command != null && command._enable_positional_options) { break; }
+        }
+        suggestion = suggest_similar(flag, candidate_flags);
+      }
+      let message = "error: unknown option '" @ flag @ "'" @ suggestion;
+      self.error(message, { code: "commander.unknown_option" });
+    },
+
+    _excess_arguments: func(received_args) {
+      if (self._allow_excess_arguments) { return; }
+      let expected = registered_arguments.length();
+      let s = (expected == 1) ? "" : "s";
+      let received = received_args.length();
+      let for_subcommand = (self.parent != null) ? " for '" @ self.name() @ "'" : "";
+      let details = received_args.join(", ");
+      self.error("error: too many arguments" @ for_subcommand @ ". Expected " @ expected @ " argument" @ s @ " but got " @ received @ ": " @ details @ ".", { code: "commander.excess_arguments" });
+    },
+
+    unknown_command: func() {
+      let unknown_name = self.args[0];
+      let suggestion = "";
+      if (self._show_suggestion_after_error) {
+        let candidate_names = [];
+        let helper = self.create_help();
+        for (command in helper.visible_commands(self)) {
+          candidate_names.push(command.name());
+          if (command.aliases_list.length() > 0) { candidate_names.push(command.aliases_list[0]); }
+        }
+        suggestion = suggest_similar(unknown_name, candidate_names);
+      }
+      self.error("error: unknown command '" @ unknown_name @ "'" @ suggestion, { code: "commander.unknown_command" });
+    }
+  };
+
+  return self;
+}

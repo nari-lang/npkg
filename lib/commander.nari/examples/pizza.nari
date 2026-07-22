@@ -1,0 +1,30 @@
+// Port of the commander.js "pizza" example to Nari.
+//
+// Try:
+//   nari examples/pizza.nari --help
+//   nari examples/pizza.nari --size large -d coke --peppers jalapeno 3
+//   nari examples/pizza.nari --size medium --cheese 2
+
+import "../commander.nari";
+
+let program = create_command("pizza");
+
+program
+  .name("pizza")
+  .description("Order a pizza from the command line")
+  .version("1.0.0")
+  .option("-p, --peppers <type>", "Add peppers of a given type")
+  .option("-c, --cheese [type]", "Add cheese, optionally with a type", "mozzarella")
+  .option("-a, --all-the-cheese", "Add every available cheese")
+  .required_option("-s, --size <size>", "pizza size")
+  .add_option(create_option("-d, --drink <drink>", "drink choice").choices(["coke", "pepsi", "water"]))
+  .argument("[count]", "number of pizzas", "1")
+  .action(func(count, options) {
+    print("You ordered " @ count @ " " @ options.size @ " pizza(s).");
+    print("  cheese: " @ to_string(options.cheese));
+    print("  peppers: " @ to_string(options.peppers));
+    print("  drink: " @ to_string(options.drink));
+    print("  allTheCheese: " @ to_string(options.all_the_cheese));
+  });
+
+program.parse();

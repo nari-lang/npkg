@@ -1,0 +1,35 @@
+// error.nari - Commander error sentinels.
+//
+// Port of commander.js lib/error.js. Nari has no exceptions, so these are
+// plain sentinel objects: `error()` / `_exit()` use `CommanderError`, and
+// custom parse callbacks return `InvalidArgumentError(...)` to signal failure
+// (the parser inspects the return value and turns it into a command error).
+
+export func commander_error(exit_code, code, message) {
+  return {
+    __commander_error: true,
+    name: "CommanderError",
+    exit_code: exit_code,
+    code: code,
+    message: message,
+    nested_error: null
+  };
+}
+
+export func invalid_argument_error(message) {
+  return {
+    __invalid_argument: true,
+    name: "InvalidArgumentError",
+    exit_code: 1,
+    code: "commander.invalid_argument",
+    message: message
+  };
+}
+
+export func is_invalid_argument(val) {
+  return is_object(val) && val.has_key("__invalid_argument") && val.__invalid_argument == true;
+}
+
+export func is_commander_error(val) {
+  return is_object(val) && val.has_key("__commander_error") && val.__commander_error == true;
+}

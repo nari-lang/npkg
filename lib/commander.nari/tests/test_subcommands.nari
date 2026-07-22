@@ -1,0 +1,50 @@
+import "../main.nari";
+
+func build_pm() {
+  let program = create_command("pm");
+  program
+    .name("pm")
+    .description("Fake package manager")
+    .version("0.0.1");
+
+  program
+    .command("install [packages...]")
+    .description("install one or more packages")
+    .alias("i")
+    .action(func(packages, options) {
+      print("install: " @ packages);
+    });
+
+  program
+    .command("list")
+    .description("list packages")
+    .action(func() {
+      print("listing packages...");
+    });
+
+  program
+    .command("search <query>")
+    .description("search for packages")
+    .action(func(query) {
+      print("searching for: " @ query);
+    });
+
+  return program;
+}
+
+func run(args) {
+  print("=== pm " @ args.join(" ") @ " ===");
+  let p = build_pm();
+  p.exit_override(func(err) { print("  [exit " @ err.exit_code @ "]"); return true; });
+  p.parse(args, { from: "user" });
+}
+
+run(["install", "lodash", "express"]);
+run(["i", "chalk"]);
+run(["list"]);
+run(["search", "react"]);
+run(["--help"]);
+run(["--version"]);
+run(["install", "--help"]);
+run(["help"]);
+run(["help", "install"]);
